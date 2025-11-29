@@ -1,0 +1,56 @@
+Step-by-Step Setup
+Step 1: Prepare Both Machines
+On both machines, install necessary tools:
+
+bash
+sudo apt update
+sudo apt install g++ build-essential
+Step 2: Compile on Both Machines
+On Server Machine:
+
+bash
+g++ -std=c++17 -pthread -o keyboard_monitor main.cpp
+On Client Machine:
+
+bash
+g++ -std=c++17 -pthread -o keyboard_monitor main.cpp
+Step 3: Run the System
+First, start the SERVER (on 192.168.100.8):
+
+bash
+sudo ./keyboard_monitor server 8080
+You should see:
+
+text
+Server started on port 8080
+Waiting for connections...
+Then, start the CLIENT (on the other laptop):
+
+bash
+sudo ./keyboard_monitor client 192.168.100.8 8080
+Step 4: Client Consent Process
+When you run the client, you'll see this prompt:
+
+text
+=== KEYBOARD MONITORING CLIENT ===
+This application will capture ALL keystrokes on your system,
+including those typed in other applications, and send them
+to the server at 192.168.100.8:8080
+
+Do you give explicit permission for this monitoring? (yes/no):
+Type yes and press Enter to continue.
+
+Step 5: Testing the Global Keystroke Capture
+To test if global keystroke capture works:
+
+On Client Machine:
+
+After granting consent, the client will start capturing
+
+Open any application (browser, text editor, terminal, etc.)
+
+Type anything anywhere on the system
+
+On Server Machine:
+
+You should see real-time updates showing the keystrokes
