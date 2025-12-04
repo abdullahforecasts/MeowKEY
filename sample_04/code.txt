@@ -1,0 +1,1443 @@
+#include "server.hpp"
+#include "client.hpp"
+#include <iostream>
+#include <string>
+#include <cstdlib>
+
+void printUsage() {
+    std::cout << "Usage:" << std::endl;
+    std::cout << "  Server: ./keyboard_monitor server <port>" << std::endl;
+    std::cout << "  Client: ./keyboard_monitor client <server_ip> <server_port>" << std::endl;
+    std::cout << std::endl;
+    std::cout << "Examples:" << std::endl;
+    std::cout << "  Server: ./keyboard_monitor server 8080" << std::endl;
+    std::cout << "  Client: ./keyboard_monitor client 192.168.1.100 8080" << std::endl;
+}
+
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        printUsage();
+        return 1;
+    }
+
+    std::string mode = argv[1];
+
+    try {
+        if (mode == "server") {
+            if (argc != 3) {
+                printUsage();
+                return 1;
+            }
+            
+            int port = std::stoi(argv[2]);
+            Server server(port);
+            
+            if (!server.start()) {
+                std::cerr << "Failed to start server" << std::endl;
+                return 1;
+            }
+            
+            std::cout << "Server running. Press Enter to stop..." << std::endl;
+            std::cin.get();
+            server.stop();
+            
+        } else if (mode == "client") {
+            if (argc != 4) {
+                printUsage();
+                return 1;
+            }
+            
+            std::string server_ip = argv[2];
+            int port = std::stoi(argv[3]);
+            Client client(server_ip, port);
+            
+            if (!client.start()) {
+                std::cerr << "Failed to start client" << std::endl;
+                return 1;
+            }
+            
+            std::cout << "Client running. Press Enter to stop..." << std::endl;
+            std::cin.get();
+            client.stop();
+            
+        } else {
+            printUsage();
+            return 1;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return 1;
+    }
+
+    return 0;
+}
+// #ifndef CLIENT_HPP
+// #define CLIENT_HPP
+
+// #include "keyboard_capture.hpp"
+// #include "clipboard_monitor.hpp"  // Include clipboard monitor
+// #include "socket_utils.hpp"
+// #include "thread_safe_queue.hpp"
+// #include <thread>
+// #include <atomic>
+// #include <iostream>
+// #include <memory>
+
+// class Client {
+// private:
+//     std::string server_host_;
+//     int server_port_;
+//     std::atomic<bool> running_;
+//     std::thread network_thread_;
+//     ThreadSafeQueue<std::string> event_queue_;  // Renamed from keystroke_queue_
+//     std::unique_ptr<KeyboardCapture> keyboard_capture_;
+//     std::unique_ptr<ClipboardMonitor> clipboard_monitor_;  // Clipboard monitor
+//     bool enable_clipboard_monitoring_;  // Track clipboard consent
+
+// public:
+//     Client(const std::string& host, int port) 
+//         : server_host_(host), server_port_(port), running_(false), 
+//           enable_clipboard_monitoring_(false) {}
+
+//     ~Client() {
+//         stop();
+//     }
+
+//     bool start() {
+//         if (running_) {
+//             return false;
+//         }
+
+//         running_ = true;
+        
+//         // Get user consent
+//         if (!getUserConsent()) {
+//             std::cout << "Consent not granted. Exiting." << std::endl;
+//             return false;
+//         }
+
+//         // Initialize keyboard capture
+//         try {
+//             keyboard_capture_ = std::make_unique<KeyboardCapture>(
+//                 [this](const std::string& key) {
+//                     event_queue_.push("KEY: " + key);
+//                 }
+//             );
+//         } catch (const std::exception& e) {
+//             std::cerr << "Failed to initialize keyboard capture: " << e.what() << std::endl;
+//             return false;
+//         }
+
+//         // Initialize clipboard monitor if consented
+//         if (enable_clipboard_monitoring_) {
+//             try {
+//                 clipboard_monitor_ = std::make_unique<ClipboardMonitor>(
+//                     [this](const std::string& content) {
+//                         event_queue_.push(content);
+//                     }
+//                 );
+//             } catch (const std::exception& e) {
+//                 std::cerr << "Failed to initialize clipboard monitor: " << e.what() << std::endl;
+//                 // Continue without clipboard monitoring
+//             }
+//         }
+
+//         // Start keyboard capture
+//         if (!keyboard_capture_->start()) {
+//             std::cerr << "Failed to start keyboard capture" << std::endl;
+//             return false;
+//         }
+
+//         // Start clipboard monitoring if enabled
+//         if (clipboard_monitor_ && !clipboard_monitor_->start()) {
+//             std::cerr << "Failed to start clipboard monitoring" << std::endl;
+//             // Continue without clipboard monitoring
+//         }
+
+//         std::cout << "Keyboard device: " << keyboard_capture_->getKeyboardDevice() << std::endl;
+//         if (enable_clipboard_monitoring_) {
+//             std::cout << "Clipboard monitoring: ENABLED" << std::endl;
+//         }
+
+//         // Start network thread
+//         network_thread_ = std::thread(&Client::networkLoop, this);
+
+//         std::cout << "Client started. Capturing input events..." << std::endl;
+//         return true;
+//     }
+
+//     void stop() {
+//         running_ = false;
+//         if (keyboard_capture_) {
+//             keyboard_capture_->stop();
+//         }
+//         if (clipboard_monitor_) {
+//             clipboard_monitor_->stop();
+//         }
+//         if (network_thread_.joinable()) {
+//             network_thread_.join();
+//         }
+//     }
+
+// private:
+//     bool getUserConsent() {
+//         std::cout << "=== INPUT MONITORING CLIENT ===" << std::endl;
+//         std::cout << "This application will capture:" << std::endl;
+//         std::cout << "1. ALL keystrokes on your system" << std::endl;
+//         std::cout << "2. Clipboard content when it changes" << std::endl;
+//         std::cout << "and send them to the server at " << server_host_ << ":" << server_port_ << std::endl;
+//         std::cout << std::endl;
+//         std::cout << "WARNING: Clipboard monitoring may capture sensitive data like passwords!" << std::endl;
+//         std::cout << std::endl;
+        
+//         std::string response;
+//         std::cout << "Do you give permission for keyboard monitoring? (yes/no): ";
+//         std::getline(std::cin, response);
+//         bool keyboard_consent = (response == "yes" || response == "y" || response == "YES" || response == "Y");
+        
+//         if (!keyboard_consent) {
+//             return false;
+//         }
+        
+//         std::cout << "Do you also give permission for clipboard monitoring? (yes/no): ";
+//         std::getline(std::cin, response);
+//         enable_clipboard_monitoring_ = (response == "yes" || response == "y" || response == "YES" || response == "Y");
+        
+//         if (enable_clipboard_monitoring_) {
+//             std::cout << "CLIPBOARD WARNING: This will capture ALL copied text including passwords and sensitive data!" << std::endl;
+//             std::cout << "Are you sure? (yes/no): ";
+//             std::getline(std::cin, response);
+//             enable_clipboard_monitoring_ = (response == "yes" || response == "y" || response == "YES" || response == "Y");
+//         }
+        
+//         return true;
+//     }
+
+//     void networkLoop() {
+//         while (running_) {
+//             try {
+//                 int sockfd = SocketUtils::createSocket();
+//                 SocketUtils::connectToServer(sockfd, server_host_, server_port_);
+                
+//                 std::cout << "Connected to server successfully!" << std::endl;
+
+//                 while (running_) {
+//                     auto event_opt = event_queue_.pop();
+//                     if (event_opt) {
+//                         std::string message = *event_opt + "\n";
+//                         if (!SocketUtils::sendData(sockfd, message)) {
+//                             std::cerr << "Failed to send data. Reconnecting..." << std::endl;
+//                             break;
+//                         }
+//                     }
+                    
+//                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+//                 }
+
+//                 close(sockfd);
+//             } catch (const std::exception& e) {
+//                 std::cerr << "Connection error: " << e.what() << ". Retrying in 5 seconds..." << std::endl;
+//                 std::this_thread::sleep_for(std::chrono::seconds(5));
+//             }
+//         }
+//     }
+// };
+
+// #endif
+
+
+
+#ifndef CLIENT_HPP
+#define CLIENT_HPP
+
+#include "keyboard_capture.hpp"
+#include "clipboard_monitor.hpp"
+#include "window_monitor.hpp"  // NEW: Include window monitor
+#include "socket_utils.hpp"
+#include "thread_safe_queue.hpp"
+#include <thread>
+#include <atomic>
+#include <iostream>
+#include <memory>
+#include <fstream>
+
+class Client {
+private:
+    std::string server_host_;
+    int server_port_;
+    std::atomic<bool> running_;
+    std::thread network_thread_;
+    ThreadSafeQueue<std::string> event_queue_;
+    std::unique_ptr<KeyboardCapture> keyboard_capture_;
+    std::unique_ptr<ClipboardMonitor> clipboard_monitor_;
+    std::unique_ptr<WindowMonitor> window_monitor_;  // NEW: Window monitor
+    bool enable_clipboard_monitoring_;
+    bool enable_window_monitoring_;  // NEW: Track window monitoring consent
+
+public:
+    Client(const std::string& host, int port) 
+        : server_host_(host), server_port_(port), running_(false), 
+          enable_clipboard_monitoring_(false), enable_window_monitoring_(false) {}
+
+    ~Client() {
+        stop();
+    }
+
+    bool start() {
+        if (running_) {
+            return false;
+        }
+
+        running_ = true;
+        
+        // Get user consent
+        if (!getUserConsent()) {
+            std::cout << "Consent not granted. Exiting." << std::endl;
+            return false;
+        }
+
+        // Initialize keyboard capture
+        try {
+            keyboard_capture_ = std::make_unique<KeyboardCapture>(
+                [this](const std::string& key) {
+                    event_queue_.push("KEY: " + key);
+                }
+            );
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to initialize keyboard capture: " << e.what() << std::endl;
+            return false;
+        }
+
+        // Initialize clipboard monitor if consented
+        if (enable_clipboard_monitoring_) {
+            try {
+                clipboard_monitor_ = std::make_unique<ClipboardMonitor>(
+                    [this](const std::string& content) {
+                        event_queue_.push(content);
+                    }
+                );
+            } catch (const std::exception& e) {
+                std::cerr << "Failed to initialize clipboard monitor: " << e.what() << std::endl;
+                // Continue without clipboard monitoring
+            }
+        }
+
+        // Initialize window monitor if consented
+        if (enable_window_monitoring_) {
+            try {
+                window_monitor_ = std::make_unique<WindowMonitor>(
+                    [this](const std::string& window_info) {
+                        event_queue_.push(window_info);
+                    }
+                );
+            } catch (const std::exception& e) {
+                std::cerr << "Failed to initialize window monitor: " << e.what() << std::endl;
+                // Continue without window monitoring
+            }
+        }
+
+        // Start keyboard capture
+        if (!keyboard_capture_->start()) {
+            std::cerr << "Failed to start keyboard capture" << std::endl;
+            return false;
+        }
+
+        // Start clipboard monitoring if enabled
+        if (clipboard_monitor_ && !clipboard_monitor_->start()) {
+            std::cerr << "Failed to start clipboard monitoring" << std::endl;
+            // Continue without clipboard monitoring
+        }
+
+        // Start window monitoring if enabled
+        if (window_monitor_ && !window_monitor_->start()) {
+            std::cerr << "Failed to start window monitoring" << std::endl;
+            // Continue without window monitoring
+        }
+
+        std::cout << "Keyboard device: " << keyboard_capture_->getKeyboardDevice() << std::endl;
+        if (enable_clipboard_monitoring_) {
+            std::cout << "Clipboard monitoring: ENABLED" << std::endl;
+        }
+        if (enable_window_monitoring_) {
+            std::cout << "Window monitoring: ENABLED" << std::endl;
+        }
+
+        // Start network thread
+        network_thread_ = std::thread(&Client::networkLoop, this);
+
+        std::cout << "Client started. Capturing input events..." << std::endl;
+        return true;
+    }
+
+    void stop() {
+        running_ = false;
+        if (keyboard_capture_) {
+            keyboard_capture_->stop();
+        }
+        if (clipboard_monitor_) {
+            clipboard_monitor_->stop();
+        }
+        if (window_monitor_) {
+            window_monitor_->stop();
+        }
+        if (network_thread_.joinable()) {
+            network_thread_.join();
+        }
+    }
+
+private:
+    bool getUserConsent() {
+        std::cout << "=== INPUT MONITORING CLIENT ===" << std::endl;
+        std::cout << "This application will capture:" << std::endl;
+        std::cout << "1. ALL keystrokes on your system" << std::endl;
+        std::cout << "2. Clipboard content when it changes" << std::endl;
+        std::cout << "3. Active window/tab information when you switch" << std::endl;
+        std::cout << "and send them to the server at " << server_host_ << ":" << server_port_ << std::endl;
+        std::cout << std::endl;
+        std::cout << "WARNING: This may capture sensitive information!" << std::endl;
+        std::cout << std::endl;
+        
+        std::string response;
+        std::cout << "Do you give permission for keyboard monitoring? (yes/no): ";
+        std::getline(std::cin, response);
+        bool keyboard_consent = (response == "yes" || response == "y" || response == "YES" || response == "Y");
+        
+        if (!keyboard_consent) {
+            return false;
+        }
+        
+        std::cout << "Do you also give permission for clipboard monitoring? (yes/no): ";
+        std::getline(std::cin, response);
+        enable_clipboard_monitoring_ = (response == "yes" || response == "y" || response == "YES" || response == "Y");
+        
+        if (enable_clipboard_monitoring_) {
+            std::cout << "CLIPBOARD WARNING: This will capture ALL copied text including passwords and sensitive data!" << std::endl;
+            std::cout << "Are you sure? (yes/no): ";
+            std::getline(std::cin, response);
+            enable_clipboard_monitoring_ = (response == "yes" || response == "y" || response == "YES" || response == "Y");
+        }
+        
+        std::cout << "Do you also give permission for window/tab monitoring? (yes/no): ";
+        std::getline(std::cin, response);
+        enable_window_monitoring_ = (response == "yes" || response == "y" || response == "YES" || response == "Y");
+        
+        return true;
+    }
+
+    void networkLoop() {
+        while (running_) {
+            try {
+                int sockfd = SocketUtils::createSocket();
+                SocketUtils::connectToServer(sockfd, server_host_, server_port_);
+                
+                std::cout << "Connected to server successfully!" << std::endl;
+
+                while (running_) {
+                    auto event_opt = event_queue_.pop();
+                    if (event_opt) {
+                        std::string message = *event_opt + "\n";
+                        if (!SocketUtils::sendData(sockfd, message)) {
+                            std::cerr << "Failed to send data. Reconnecting..." << std::endl;
+                            break;
+                        }
+                    }
+                    
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+
+                close(sockfd);
+            } catch (const std::exception& e) {
+                std::cerr << "Connection error: " << e.what() << ". Retrying in 5 seconds..." << std::endl;
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+            }
+        }
+    }
+};
+
+#endif#ifndef CLIPBOARD_MONITOR_HPP
+#define CLIPBOARD_MONITOR_HPP
+
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/Xatom.h>  // ADDED: For XA_STRING and other atom definitions
+#include <iostream>
+#include <string>
+#include <thread>
+#include <atomic>
+#include <functional>
+#include <cstring>
+#include <algorithm>
+
+class ClipboardMonitor {
+private:
+    std::atomic<bool> monitoring_;
+    std::thread monitor_thread_;
+    std::function<void(const std::string&)> callback_;
+    Display* display_;
+    Window window_;
+    Atom clipboard_atom_;
+    Atom utf8_string_atom_;
+    Atom text_plain_atom_;
+    std::string last_clipboard_content_;
+    static const size_t MAX_CLIPBOARD_SIZE = 10240; // 10KB limit
+
+public:
+    ClipboardMonitor(std::function<void(const std::string&)> callback) 
+        : monitoring_(false), callback_(callback), display_(nullptr), window_(0) {}
+
+    ~ClipboardMonitor() {
+        stop();
+    }
+
+    bool start() {
+        if (monitoring_) {
+            return false;
+        }
+
+        // Initialize X11 display
+        display_ = XOpenDisplay(nullptr);
+        if (!display_) {
+            std::cerr << "Failed to open X11 display. Make sure you're running in a graphical environment." << std::endl;
+            return false;
+        }
+
+        // Create a hidden window to receive clipboard events
+        int screen = DefaultScreen(display_);
+        window_ = XCreateSimpleWindow(display_, RootWindow(display_, screen),
+                                     0, 0, 1, 1, 0, 0, 0);
+        
+        clipboard_atom_ = XInternAtom(display_, "CLIPBOARD", False);
+        utf8_string_atom_ = XInternAtom(display_, "UTF8_STRING", False);
+        text_plain_atom_ = XInternAtom(display_, "text/plain", False);
+        
+        // If UTF8_STRING is not available, fall back to standard atoms
+        if (utf8_string_atom_ == None) {
+            utf8_string_atom_ = XInternAtom(display_, "STRING", False);
+        }
+
+        monitoring_ = true;
+        monitor_thread_ = std::thread(&ClipboardMonitor::monitorLoop, this);
+        
+        std::cout << "Clipboard monitoring started" << std::endl;
+        return true;
+    }
+
+    void stop() {
+        monitoring_ = false;
+        if (monitor_thread_.joinable()) {
+            monitor_thread_.join();
+        }
+        if (display_) {
+            if (window_) {
+                XDestroyWindow(display_, window_);
+            }
+            XCloseDisplay(display_);
+            display_ = nullptr;
+        }
+        std::cout << "Clipboard monitoring stopped" << std::endl;
+    }
+
+    bool isMonitoring() const {
+        return monitoring_;
+    }
+
+private:
+    void monitorLoop() {
+        // Get initial clipboard content
+        std::string initial_content = getClipboardText();
+        if (!initial_content.empty()) {
+            last_clipboard_content_ = initial_content;
+        }
+
+        while (monitoring_) {
+            std::string current_content = getClipboardText();
+            
+            if (!current_content.empty() && current_content != last_clipboard_content_) {
+                // Truncate if too long for display
+                std::string display_content = current_content;
+                if (display_content.length() > 100) {
+                    display_content = display_content.substr(0, 100) + "...";
+                }
+                
+                std::cout << "Clipboard changed: " << display_content << std::endl;
+                
+                if (callback_) {
+                    // Send truncated version if too large
+                    if (current_content.length() > MAX_CLIPBOARD_SIZE) {
+                        std::string truncated = current_content.substr(0, MAX_CLIPBOARD_SIZE) + "...[TRUNCATED]";
+                        callback_("CLIPBOARD: " + truncated);
+                    } else {
+                        callback_("CLIPBOARD: " + current_content);
+                    }
+                }
+                
+                last_clipboard_content_ = current_content;
+            }
+            
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+    }
+
+    std::string getClipboardText() {
+        if (!display_) {
+            return "";
+        }
+
+        XEvent event;
+        std::string result;
+
+        // Try multiple target types in order of preference
+        Atom targets[] = {
+            utf8_string_atom_,
+            text_plain_atom_,
+            XA_STRING
+        };
+        
+        const int num_targets = sizeof(targets) / sizeof(targets[0]);
+
+        for (int i = 0; i < num_targets; i++) {
+            if (targets[i] == None) continue;
+            
+            // Request clipboard content
+            XConvertSelection(display_, clipboard_atom_, targets[i], 
+                             clipboard_atom_, window_, CurrentTime);
+            XFlush(display_);
+
+            // Wait for selection notify with timeout
+            time_t start_time = time(nullptr);
+            bool got_data = false;
+            
+            while (time(nullptr) - start_time < 2) { // 2 second timeout
+                if (XPending(display_)) {
+                    XNextEvent(display_, &event);
+                    
+                    if (event.type == SelectionNotify && 
+                        event.xselection.selection == clipboard_atom_) {
+                        
+                        if (event.xselection.property != None) {
+                            Atom actual_type;
+                            int actual_format;
+                            unsigned long nitems, bytes_after;
+                            unsigned char* data = nullptr;
+                            
+                            if (XGetWindowProperty(display_, window_, 
+                                                 event.xselection.property,
+                                                 0, MAX_CLIPBOARD_SIZE, False, 
+                                                 AnyPropertyType,
+                                                 &actual_type, &actual_format,
+                                                 &nitems, &bytes_after, &data) == Success) {
+                                
+                                if (data && nitems > 0 && actual_format == 8) {
+                                    result = std::string(reinterpret_cast<char*>(data), nitems);
+                                    
+                                    // Clean up: remove non-printable characters except newlines and tabs
+                                    result.erase(std::remove_if(result.begin(), result.end(),
+                                        [](char c) { 
+                                            return (c < 32 && c != '\n' && c != '\t' && c != '\r') || c == 127; 
+                                        }), result.end());
+                                    
+                                    got_data = true;
+                                }
+                                
+                                if (data) {
+                                    XFree(data);
+                                }
+                                
+                                // Delete the property to clean up
+                                XDeleteProperty(display_, window_, event.xselection.property);
+                            }
+                        }
+                        break;
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            
+            if (got_data && !result.empty()) {
+                break;
+            }
+        }
+
+        return result;
+    }
+};
+
+#endif
+
+#ifndef KEYBOARD_CAPTURE_HPP
+#define KEYBOARD_CAPTURE_HPP
+
+#include <linux/input.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <string>
+#include <vector>
+#include <fstream>
+#include <iostream>
+#include <cstring>
+#include <thread>
+#include <atomic>
+#include <functional>
+#include <unordered_map>
+
+class KeyboardCapture {
+private:
+    std::atomic<bool> capturing_;
+    std::thread capture_thread_;
+    std::function<void(const std::string&)> callback_;
+    std::string keyboard_device_;
+
+public:
+    KeyboardCapture(std::function<void(const std::string&)> callback) 
+        : capturing_(false), callback_(callback) {
+        findKeyboardDevice();
+    }
+
+    ~KeyboardCapture() {
+        stop();
+    }
+
+    bool start() {
+        if (capturing_) {
+            return false;
+        }
+
+        capturing_ = true;
+        capture_thread_ = std::thread(&KeyboardCapture::captureLoop, this);
+        return true;
+    }
+
+    void stop() {
+        capturing_ = false;
+        if (capture_thread_.joinable()) {
+            capture_thread_.join();
+        }
+    }
+
+    bool isCapturing() const {
+        return capturing_;
+    }
+
+    std::string getKeyboardDevice() const {
+        return keyboard_device_;
+    }
+
+private:
+    void findKeyboardDevice() {
+        std::cout << "Searching for keyboard devices..." << std::endl;
+        
+        // Try event2 first (based on your system configuration)
+        std::vector<std::string> possible_paths = {
+            "/dev/input/event2",  // Your specific keyboard device
+            "/dev/input/event3", "/dev/input/event4", "/dev/input/event5",
+            "/dev/input/event0", "/dev/input/event1", "/dev/input/event6",
+            "/dev/input/event7", "/dev/input/event8", "/dev/input/event9"
+        };
+
+        for (const auto& path : possible_paths) {
+            std::cout << "Testing device: " << path << std::endl;
+            if (isKeyboardDevice(path)) {
+                keyboard_device_ = path;
+                std::cout << "✓ Found keyboard device: " << path << std::endl;
+                return;
+            }
+        }
+
+        throw std::runtime_error("Could not find keyboard device. Please check permissions.");
+    }
+
+    bool isKeyboardDevice(const std::string& path) {
+        int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+        if (fd < 0) {
+            std::cout << "  ✗ Cannot open: " << strerror(errno) << std::endl;
+            return false;
+        }
+
+        // Get device capabilities
+        unsigned long evbit = 0;
+        if (ioctl(fd, EVIOCGBIT(0, sizeof(evbit)), &evbit) < 0) {
+            close(fd);
+            std::cout << "  ✗ Cannot get capabilities" << std::endl;
+            return false;
+        }
+
+        // Check if device has key events
+        if (!(evbit & (1 << EV_KEY))) {
+            close(fd);
+            std::cout << "  ✗ Not a key device" << std::endl;
+            return false;
+        }
+
+        // Get key bitmap to verify it's a keyboard
+        unsigned char keybit[KEY_MAX/8 + 1];
+        memset(keybit, 0, sizeof(keybit));
+        
+        if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybit)), keybit) < 0) {
+            close(fd);
+            std::cout << "  ✗ Cannot get key bitmap" << std::endl;
+            return false;
+        }
+
+        close(fd);
+
+        // Check for common keyboard keys
+        bool has_letters = (keybit[KEY_A/8] & (1 << (KEY_A % 8)));
+        bool has_space = (keybit[KEY_SPACE/8] & (1 << (KEY_SPACE % 8)));
+        bool has_enter = (keybit[KEY_ENTER/8] & (1 << (KEY_ENTER % 8)));
+
+        if (has_letters && has_space && has_enter) {
+            std::cout << "  ✓ Valid keyboard device" << std::endl;
+            return true;
+        }
+
+        std::cout << "  ✗ Missing common keyboard keys" << std::endl;
+        return false;
+    }
+
+    void captureLoop() {
+        std::cout << "Starting capture loop on device: " << keyboard_device_ << std::endl;
+        
+        int fd = open(keyboard_device_.c_str(), O_RDONLY | O_NONBLOCK);
+        if (fd < 0) {
+            std::cerr << "Failed to open keyboard device: " << keyboard_device_ 
+                      << " Error: " << strerror(errno) << std::endl;
+            return;
+        }
+
+        std::cout << "✓ Successfully opened keyboard device. Capturing keystrokes..." << std::endl;
+        std::cout << "Try typing in any application (browser, terminal, etc.)" << std::endl;
+
+        input_event ev;
+        int event_count = 0;
+        
+        while (capturing_) {
+            ssize_t bytes_read = read(fd, &ev, sizeof(ev));
+            
+            if (bytes_read == sizeof(ev)) {
+                if (ev.type == EV_KEY) {
+                    event_count++;
+                    std::string event_type;
+                    switch (ev.value) {
+                        case 0: event_type = "RELEASE"; break;
+                        case 1: event_type = "PRESS"; break;
+                        case 2: event_type = "REPEAT"; break;
+                        default: event_type = "UNKNOWN"; break;
+                    }
+                    
+                    // Only process key presses for now
+                    if (ev.value == 1) {
+                        std::string key_name = keyCodeToString(ev.code);
+                        std::cout << "[" << event_count << "] Captured key: " << key_name 
+                                  << " (code: " << ev.code << ", type: " << event_type << ")" << std::endl;
+                        
+                        if (!key_name.empty() && callback_) {
+                            callback_(key_name);
+                        }
+                    }
+                }
+            } else if (bytes_read < 0) {
+                if (errno != EAGAIN) {
+                    // Non-recoverable error
+                    std::cerr << "Read error: " << strerror(errno) << std::endl;
+                    break;
+                }
+                // EAGAIN means no data available, just continue
+            }
+            
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        close(fd);
+        std::cout << "Capture loop ended. Total events processed: " << event_count << std::endl;
+    }
+
+    std::string keyCodeToString(int key_code) {
+        static const std::unordered_map<int, std::string> key_map = {
+            {KEY_A, "A"}, {KEY_B, "B"}, {KEY_C, "C"}, {KEY_D, "D"}, {KEY_E, "E"},
+            {KEY_F, "F"}, {KEY_G, "G"}, {KEY_H, "H"}, {KEY_I, "I"}, {KEY_J, "J"},
+            {KEY_K, "K"}, {KEY_L, "L"}, {KEY_M, "M"}, {KEY_N, "N"}, {KEY_O, "O"},
+            {KEY_P, "P"}, {KEY_Q, "Q"}, {KEY_R, "R"}, {KEY_S, "S"}, {KEY_T, "T"},
+            {KEY_U, "U"}, {KEY_V, "V"}, {KEY_W, "W"}, {KEY_X, "X"}, {KEY_Y, "Y"},
+            {KEY_Z, "Z"},
+            {KEY_0, "0"}, {KEY_1, "1"}, {KEY_2, "2"}, {KEY_3, "3"}, {KEY_4, "4"},
+            {KEY_5, "5"}, {KEY_6, "6"}, {KEY_7, "7"}, {KEY_8, "8"}, {KEY_9, "9"},
+            {KEY_SPACE, "SPACE"}, {KEY_ENTER, "ENTER"}, {KEY_BACKSPACE, "BACKSPACE"},
+            {KEY_TAB, "TAB"}, {KEY_ESC, "ESC"}, {KEY_LEFTCTRL, "CTRL"},
+            {KEY_LEFTSHIFT, "SHIFT"}, {KEY_RIGHTSHIFT, "RSHIFT"}, {KEY_LEFTALT, "ALT"},
+            {KEY_RIGHTALT, "RALT"}, {KEY_LEFTMETA, "META"}, {KEY_RIGHTMETA, "RMETA"},
+            {KEY_COMMA, ","}, {KEY_DOT, "."}, {KEY_SLASH, "/"}, {KEY_SEMICOLON, ";"},
+            {KEY_APOSTROPHE, "'"}, {KEY_LEFTBRACE, "["}, {KEY_RIGHTBRACE, "]"},
+            {KEY_BACKSLASH, "\\"}, {KEY_MINUS, "-"}, {KEY_EQUAL, "="}, {KEY_GRAVE, "`"},
+            {KEY_UP, "UP"}, {KEY_DOWN, "DOWN"}, {KEY_LEFT, "LEFT"}, {KEY_RIGHT, "RIGHT"},
+            {KEY_F1, "F1"}, {KEY_F2, "F2"}, {KEY_F3, "F3"}, {KEY_F4, "F4"},
+            {KEY_F5, "F5"}, {KEY_F6, "F6"}, {KEY_F7, "F7"}, {KEY_F8, "F8"},
+            {KEY_F9, "F9"}, {KEY_F10, "F10"}, {KEY_F11, "F11"}, {KEY_F12, "F12"}
+        };
+
+        auto it = key_map.find(key_code);
+        if (it != key_map.end()) {
+            return it->second;
+        }
+        return "KEY_" + std::to_string(key_code);
+    }
+};
+
+#endif #ifndef SERVER_HPP
+#define SERVER_HPP
+
+#include "socket_utils.hpp"
+#include "thread_safe_queue.hpp"
+#include <thread>
+#include <atomic>
+#include <unordered_map>
+#include <mutex>
+#include <vector>
+#include <sstream>
+#include <iomanip>
+#include<iostream>
+
+class ClientHandler {
+private:
+    int client_socket_;
+    std::atomic<bool> running_;
+    std::thread handler_thread_;
+    std::string client_id_;
+    static std::mutex display_mutex_;
+
+public:
+    ClientHandler(int socket, const std::string& id) 
+        : client_socket_(socket), running_(false), client_id_(id) {}
+
+    ~ClientHandler() {
+        stop();
+    }
+
+    void start() {
+        running_ = true;
+        handler_thread_ = std::thread(&ClientHandler::handleClient, this);
+    }
+
+    void stop() {
+        running_ = false;
+        if (handler_thread_.joinable()) {
+            handler_thread_.join();
+        }
+        if (client_socket_ >= 0) {
+            close(client_socket_);
+        }
+    }
+
+    bool isRunning() const {
+        return running_;
+    }
+
+    std::string getClientId() const {
+        return client_id_;
+    }
+
+private:
+    void handleClient() {
+        std::vector<std::string> recent_keystrokes;
+        const size_t N = 10; // Display last 10 keystrokes
+
+        std::cout << "Client " << client_id_ << " connected" << std::endl;
+
+        while (running_) {
+            std::string data = SocketUtils::receiveData(client_socket_);
+            if (data.empty()) {
+                break;
+            }
+
+            // Process received keystrokes
+            std::istringstream stream(data);
+            std::string line;
+            while (std::getline(stream, line)) {
+                if (!line.empty()) {
+                    recent_keystrokes.push_back(line);
+                    if (recent_keystrokes.size() > N) {
+                        recent_keystrokes.erase(recent_keystrokes.begin());
+                    }
+                    displayRecentKeystrokes(recent_keystrokes);
+                }
+            }
+        }
+
+        std::cout << "Client " << client_id_ << " disconnected" << std::endl;
+    }
+
+    void displayRecentKeystrokes(const std::vector<std::string>& keystrokes) {
+        std::lock_guard<std::mutex> lock(display_mutex_);
+        
+        std::cout << "\n=== Client: " << client_id_ << " ===" << std::endl;
+        std::cout << "Recent keystrokes:" << std::endl;
+        
+        for (size_t i = 0; i < keystrokes.size(); ++i) {
+            std::cout << "  " << (i + 1) << ". " << keystrokes[i] << std::endl;
+        }
+        
+        if (keystrokes.empty()) {
+            std::cout << "  No keystrokes received yet" << std::endl;
+        }
+        
+        std::cout << "==================" << std::endl;
+    }
+};
+
+std::mutex ClientHandler::display_mutex_;
+
+class Server {
+private:
+    int port_;
+    std::atomic<bool> running_;
+    std::thread accept_thread_;
+    std::unordered_map<std::string, std::unique_ptr<ClientHandler>> clients_;
+    std::mutex clients_mutex_;
+    int client_counter_;
+
+public:
+    Server(int port) : port_(port), running_(false), client_counter_(0) {}
+
+    ~Server() {
+        stop();
+    }
+
+    bool start() {
+        if (running_) {
+            return false;
+        }
+
+        running_ = true;
+        accept_thread_ = std::thread(&Server::acceptLoop, this);
+
+        std::cout << "Server started on port " << port_ << std::endl;
+        std::cout << "Waiting for connections..." << std::endl;
+
+        return true;
+    }
+
+    void stop() {
+        running_ = false;
+        
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            for (auto& client : clients_) {
+                client.second->stop();
+            }
+            clients_.clear();
+        }
+
+        if (accept_thread_.joinable()) {
+            accept_thread_.join();
+        }
+    }
+
+private:
+    void acceptLoop() {
+        try {
+            int server_socket = SocketUtils::createSocket();
+            SocketUtils::bindSocket(server_socket, port_);
+            SocketUtils::listenSocket(server_socket);
+
+            while (running_) {
+                int client_socket = SocketUtils::acceptConnection(server_socket);
+                
+                std::string client_id = "Client_" + std::to_string(++client_counter_);
+                
+                auto client_handler = std::make_unique<ClientHandler>(client_socket, client_id);
+                client_handler->start();
+                
+                {
+                    std::lock_guard<std::mutex> lock(clients_mutex_);
+                    clients_[client_id] = std::move(client_handler);
+                }
+
+                // Clean up disconnected clients
+                cleanupClients();
+            }
+
+            close(server_socket);
+        } catch (const std::exception& e) {
+            std::cerr << "Server error: " << e.what() << std::endl;
+        }
+    }
+
+    void cleanupClients() {
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        for (auto it = clients_.begin(); it != clients_.end();) {
+            if (!it->second->isRunning()) {
+                it = clients_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+};
+
+#endif#ifndef SOCKET_UTILS_HPP
+#define SOCKET_UTILS_HPP
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <string>
+#include <cstring>
+#include <stdexcept>
+
+class SocketUtils {
+public:
+    static int createSocket() {
+        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd < 0) {
+            throw std::runtime_error("Failed to create socket");
+        }
+        
+        int opt = 1;
+        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+            throw std::runtime_error("Failed to set socket options");
+        }
+        
+        return sockfd;
+    }
+
+    static void bindSocket(int sockfd, int port) {
+        sockaddr_in server_addr{};
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_addr.s_addr = INADDR_ANY;
+        server_addr.sin_port = htons(port);
+        
+        if (bind(sockfd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+            throw std::runtime_error("Failed to bind socket");
+        }
+    }
+
+    static void listenSocket(int sockfd, int backlog = 10) {
+        if (listen(sockfd, backlog) < 0) {
+            throw std::runtime_error("Failed to listen on socket");
+        }
+    }
+
+    static int acceptConnection(int sockfd) {
+        sockaddr_in client_addr{};
+        socklen_t client_len = sizeof(client_addr);
+        
+        int client_sockfd = accept(sockfd, (sockaddr*)&client_addr, &client_len);
+        if (client_sockfd < 0) {
+            throw std::runtime_error("Failed to accept connection");
+        }
+        
+        return client_sockfd;
+    }
+
+    static void connectToServer(int sockfd, const std::string& host, int port) {
+        sockaddr_in server_addr{};
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(port);
+        
+        if (inet_pton(AF_INET, host.c_str(), &server_addr.sin_addr) <= 0) {
+            throw std::runtime_error("Invalid address");
+        }
+        
+        if (connect(sockfd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+            throw std::runtime_error("Failed to connect to server");
+        }
+    }
+
+    static bool sendData(int sockfd, const std::string& data) {
+        size_t total_sent = 0;
+        while (total_sent < data.size()) {
+            ssize_t sent = send(sockfd, data.c_str() + total_sent, 
+                               data.size() - total_sent, 0);
+            if (sent <= 0) {
+                return false;
+            }
+            total_sent += sent;
+        }
+        return true;
+    }
+
+    static std::string receiveData(int sockfd, size_t max_size = 1024) {
+        char buffer[max_size];
+        ssize_t received = recv(sockfd, buffer, max_size - 1, 0);
+        if (received <= 0) {
+            return "";
+        }
+        buffer[received] = '\0';
+        return std::string(buffer, received);
+    }
+};
+
+#endif#ifndef THREAD_SAFE_QUEUE_HPP
+#define THREAD_SAFE_QUEUE_HPP
+
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <optional>
+
+template<typename T> 
+class ThreadSafeQueue { 
+private:
+    mutable std::mutex mutex_;
+    std::queue<T> queue_;
+    std::condition_variable condition_;  
+    size_t max_size_;
+
+public:
+    ThreadSafeQueue(size_t max_size = 1000) : max_size_(max_size) {}
+
+    void push(T value) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (queue_.size() >= max_size_) {
+            queue_.pop(); // Remove oldest if queue is full
+        }
+        queue_.push(std::move(value));
+        condition_.notify_one();
+    }
+
+    std::optional<T> pop() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (condition_.wait_for(lock, std::chrono::milliseconds(100), 
+                               [this] { return !queue_.empty(); })) {
+            T value = std::move(queue_.front());
+            queue_.pop();
+            return value;
+        }
+        return std::nullopt;
+    }
+
+    bool empty() const {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return queue_.empty();
+    }
+
+    size_t size() const {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return queue_.size();
+    }
+};
+
+#endif#ifndef WINDOW_MONITOR_HPP
+#define WINDOW_MONITOR_HPP
+
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/Xatom.h>
+#include <iostream>
+#include <string>
+#include <thread>
+#include <atomic>
+#include <functional>
+#include <cstring>
+#include <fstream>
+#include <algorithm>
+
+class WindowMonitor {
+private:
+    std::atomic<bool> monitoring_;
+    std::thread monitor_thread_;
+    std::function<void(const std::string&)> callback_;
+    Display* display_;
+    Window root_window_;
+    std::string last_window_title_;
+    static constexpr int CHECK_INTERVAL_MS = 1000; // Check every second
+
+public:
+    WindowMonitor(std::function<void(const std::string&)> callback) 
+        : monitoring_(false), callback_(callback), display_(nullptr), root_window_(0) {}
+
+    ~WindowMonitor() {
+        stop();
+    }
+
+    bool start() {
+        if (monitoring_) {
+            return false;
+        }
+
+        // Initialize X11 display
+        display_ = XOpenDisplay(nullptr);
+        if (!display_) {
+            std::cerr << "Failed to open X11 display for window monitoring." << std::endl;
+            return false;
+        }
+
+        root_window_ = DefaultRootWindow(display_);
+        monitoring_ = true;
+        monitor_thread_ = std::thread(&WindowMonitor::monitorLoop, this);
+        
+        std::cout << "Window monitoring started" << std::endl;
+        return true;
+    }
+
+    void stop() {
+        monitoring_ = false;
+        if (monitor_thread_.joinable()) {
+            monitor_thread_.join();
+        }
+        if (display_) {
+            XCloseDisplay(display_);
+            display_ = nullptr;
+        }
+        std::cout << "Window monitoring stopped" << std::endl;
+    }
+
+    bool isMonitoring() const {
+        return monitoring_;
+    }
+
+private:
+    void monitorLoop() {
+        // Get initial window
+        std::string initial_window = getActiveWindowTitle();
+        if (!initial_window.empty()) {
+            last_window_title_ = initial_window;
+            if (callback_) {
+                callback_("WINDOW: " + initial_window);
+            }
+        }
+
+        while (monitoring_) {
+            std::string current_window = getActiveWindowTitle();
+            
+            if (!current_window.empty() && current_window != last_window_title_) {
+                std::cout << "Window changed to: " << current_window << std::endl;
+                
+                if (callback_) {
+                    callback_("WINDOW: " + current_window);
+                }
+                
+                last_window_title_ = current_window;
+            }
+            
+            std::this_thread::sleep_for(std::chrono::milliseconds(CHECK_INTERVAL_MS));
+        }
+    }
+
+    std::string getActiveWindowTitle() {
+        if (!display_) {
+            return "";
+        }
+
+        Window focused_window;
+        int revert_to;
+        
+        // Get currently focused window
+        if (XGetInputFocus(display_, &focused_window, &revert_to) == 0) {
+            return "";
+        }
+
+        // If we get the root window, try another method
+        if (focused_window == root_window_) {
+            // Use _NET_ACTIVE_WINDOW property
+            Atom active_window_atom = XInternAtom(display_, "_NET_ACTIVE_WINDOW", False);
+            Atom type;
+            int format;
+            unsigned long nitems, bytes_after;
+            unsigned char* data = nullptr;
+            
+            if (XGetWindowProperty(display_, root_window_, active_window_atom,
+                                 0, 1024, False, XA_WINDOW,
+                                 &type, &format, &nitems, &bytes_after,
+                                 &data) == Success && data) {
+                if (nitems > 0) {
+                    focused_window = *((Window*)data);
+                }
+                XFree(data);
+            }
+        }
+
+        if (focused_window == None || focused_window == root_window_) {
+            return "Unknown Window";
+        }
+
+        // Get window title using _NET_WM_NAME (UTF-8)
+        std::string title = getWindowProperty(focused_window, "_NET_WM_NAME");
+        if (title.empty()) {
+            // Fallback to WM_NAME (legacy)
+            title = getWindowProperty(focused_window, "WM_NAME");
+        }
+
+        // Get process name if available
+        std::string process_name = getWindowProcessName(focused_window);
+        
+        std::string result;
+        if (!title.empty()) {
+            result = title;
+            if (!process_name.empty()) {
+                result += " [" + process_name + "]";
+            }
+        } else if (!process_name.empty()) {
+            result = process_name;
+        } else {
+            result = "Window " + std::to_string((unsigned long)focused_window);
+        }
+
+        // Clean up the string
+        result.erase(std::remove_if(result.begin(), result.end(),
+            [](char c) { 
+                return (c < 32 && c != '\n' && c != '\t') || c == 127; 
+            }), result.end());
+
+        return result;
+    }
+
+    std::string getWindowProperty(Window window, const char* property_name) {
+        Atom property_atom = XInternAtom(display_, property_name, False);
+        Atom type;
+        int format;
+        unsigned long nitems, bytes_after;
+        unsigned char* data = nullptr;
+        
+        std::string result;
+        
+        if (XGetWindowProperty(display_, window, property_atom,
+                             0, 1024, False, AnyPropertyType,
+                             &type, &format, &nitems, &bytes_after,
+                             &data) == Success && data && nitems > 0) {
+            
+            if (format == 8) { // String format
+                result = std::string(reinterpret_cast<char*>(data), nitems);
+            }
+            
+            XFree(data);
+        }
+        
+        return result;
+    }
+
+    std::string getWindowProcessName(Window window) {
+        // Try to get process ID and name using _NET_WM_PID
+        Atom pid_atom = XInternAtom(display_, "_NET_WM_PID", False);
+        Atom type;
+        int format;
+        unsigned long nitems, bytes_after;
+        unsigned char* data = nullptr;
+        
+        std::string process_name;
+        
+        if (XGetWindowProperty(display_, window, pid_atom,
+                             0, 1, False, XA_CARDINAL,
+                             &type, &format, &nitems, &bytes_after,
+                             &data) == Success && data && nitems > 0) {
+            
+            if (format == 32) {
+                pid_t pid = *((pid_t*)data);
+                
+                // Try to get process name from /proc
+                std::string proc_path = "/proc/" + std::to_string(pid) + "/comm";
+                std::ifstream proc_file(proc_path);
+                if (proc_file) {
+                    std::getline(proc_file, process_name);
+                }
+            }
+            
+            XFree(data);
+        }
+        
+        return process_name;
+    }
+};
+
+#endif
