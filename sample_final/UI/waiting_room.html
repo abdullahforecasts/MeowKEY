@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Waiting Room - MeowKey Monitor</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <h1>MeowKey Monitor</h1>
+                <p class="subtitle">Client Approval Queue</p>
+            </div>
+            <nav class="nav">
+                <a href="index.html" class="nav-link"><i class="fas fa-tachometer-alt"></i> Dashboard</a>
+                <a href="waiting_room.html" class="nav-link active"><i class="fas fa-user-clock"></i> Waiting Room</a>
+                <a href="clients.html" class="nav-link"><i class="fas fa-users"></i> Clients</a>
+                <a href="settings.html" class="nav-link"><i class="fas fa-cog"></i> Settings</a>
+                <div class="status-indicator">
+                    <span class="status-dot active"></span>
+                    <span class="status-text">Server: Online</span>
+                </div>
+            </nav>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <div class="dashboard-header">
+                <h2>Pending Client Approvals</h2>
+                <div class="stats-summary">
+                    <div class="stat-card">
+                        <span class="stat-value" id="pending-count">0</span>
+                        <span class="stat-label">Pending Clients</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-value" id="approved-today">0</span>
+                        <span class="stat-label">Approved Today</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-value" id="rejected-today">0</span>
+                        <span class="stat-label">Rejected Today</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pending Clients List -->
+            <div class="pending-clients" id="pending-clients-container">
+                <div class="empty-state">
+                    <i class="fas fa-check-circle"></i>
+                    <h3>No Pending Clients</h3>
+                    <p>All client requests have been processed</p>
+                </div>
+            </div>
+
+            <!-- Instructions -->
+            <div class="settings-card" style="margin-top: 2rem;">
+                <h3>Approval Guidelines</h3>
+                <div class="setting-item">
+                    <p class="text-muted">Review each client request carefully before approval. Only approve clients you recognize and trust.</p>
+                </div>
+                <div class="statistics-grid">
+                    <div class="stat-row">
+                        <span>Automatic Approval</span>
+                        <span class="text-muted">Disabled</span>
+                    </div>
+                    <div class="stat-row">
+                        <span>Default Monitoring</span>
+                        <span class="text-muted">Keyboard & Clipboard</span>
+                    </div>
+                    <div class="stat-row">
+                        <span>Session Timeout</span>
+                        <span class="text-muted">8 hours</span>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>MeowKey Monitoring System v1.0 | Secure Connection Established</p>
+            <p class="timestamp" id="current-time"></p>
+        </footer>
+    </div>
+
+    <script src="js/utils.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

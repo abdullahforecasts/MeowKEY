@@ -1,0 +1,19 @@
+{
+  "name": "meowkey-monitor-ui",
+  "version": "1.0.0",
+  "description": "Web UI for MeowKey Monitoring System",
+  "main": "api/server.js",
+  "scripts": {
+    "start": "node api/server.js",
+    "dev": "nodemon api/server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "author": "MeowKey Team",
+  "license": "MIT"
+}
+

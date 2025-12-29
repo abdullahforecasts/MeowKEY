@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Client Management - MeowKey Monitor</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <h1>MeowKey Monitor</h1>
+                <p class="subtitle">Client Management</p>
+            </div>
+            <nav class="nav">
+                <a href="index.html" class="nav-link"><i class="fas fa-tachometer-alt"></i> Dashboard</a>
+                <a href="waiting_room.html" class="nav-link"><i class="fas fa-user-clock"></i> Waiting Room</a>
+                <a href="clients.html" class="nav-link active"><i class="fas fa-users"></i> Clients</a>
+                <a href="settings.html" class="nav-link"><i class="fas fa-cog"></i> Settings</a>
+                <div class="status-indicator">
+                    <span class="status-dot active"></span>
+                    <span class="status-text">Server: Online</span>
+                </div>
+            </nav>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <div class="dashboard-header">
+                <h2>All Registered Clients</h2>
+                <div class="stats-summary">
+                    <div class="stat-card">
+                        <span class="stat-value" id="total-registered">0</span>
+                        <span class="stat-label">Total Registered</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-value" id="active-now">0</span>
+                        <span class="stat-label">Currently Active</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-value" id="inactive-clients">0</span>
+                        <span class="stat-label">Inactive</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Client Management Controls -->
+            <div class="settings-card" style="margin-bottom: 1.5rem;">
+                <h3>Client Actions</h3>
+                <div style="display: flex; gap: 1rem; margin-top: 1rem;">
+                    <button class="btn-secondary" id="refresh-clients">
+                        <i class="fas fa-sync-alt"></i> Refresh List
+                    </button>
+                    <button class="btn-secondary" id="export-data">
+                        <i class="fas fa-download"></i> Export Client Data
+                    </button>
+                    <button class="btn-secondary" id="view-statistics">
+                        <i class="fas fa-chart-bar"></i> View Statistics
+                    </button>
+                </div>
+            </div>
+
+            <!-- Clients Table -->
+            <div class="pending-clients">
+                <div class="client-header" style="background: #f8f9fa;">
+                    <div style="display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr; gap: 1rem; width: 100%;">
+                        <span style="font-weight: 600;">Client ID</span>
+                        <span style="font-weight: 600;">Status</span>
+                        <span style="font-weight: 600;">Sessions</span>
+                        <span style="font-weight: 600;">Last Active</span>
+                        <span style="font-weight: 600;">Actions</span>
+                    </div>
+                </div>
+                
+                <div id="clients-table">
+                    <!-- Clients will be dynamically inserted here -->
+                    <div class="empty-state" style="border: none; padding: 2rem;">
+                        <i class="fas fa-users"></i>
+                        <h3>No Clients Found</h3>
+                        <p>No clients have registered with the server yet</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Client Details Modal -->
+            <div class="modal" id="client-details-modal">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3 id="client-details-title">Client Details</h3>
+                        <button class="close-modal" id="close-details-modal">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="settings-grid">
+                            <div class="settings-card">
+                                <h3>Basic Information</h3>
+                                <div class="statistics-grid">
+                                    <div class="stat-row">
+                                        <span>Client ID</span>
+                                        <span id="detail-client-id" class="text-muted">-</span>
+                                    </div>
+                                    <div class="stat-row">
+                                        <span>Client Hash</span>
+                                        <span id="detail-client-hash" class="text-muted">-</span>
+                                    </div>
+                                    <div class="stat-row">
+                                        <span>First Seen</span>
+                                        <span id="detail-first-seen" class="text-muted">-</span>
+                                    </div>
+                                    <div class="stat-row">
+                                        <span>Last Seen</span>
+                                        <span id="detail-last-seen" class="text-muted">-</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="settings-card">
+                                <h3>Activity Statistics</h3>
+                                <div class="statistics-grid">
+                                    <div class="stat-row">
+                                        <span>Total Sessions</span>
+                                        <span id="detail-session-count" class="text-muted">0</span>
+                                    </div>
+                                    <div class="stat-row">
+                                        <span>Keystrokes</span>
+                                        <span id="detail-keystrokes" class="text-muted">0</span>
+                                    </div>
+                                    <div class="stat-row">
+                                        <span>Clipboard Events</span>
+                                        <span id="detail-clipboard" class="text-muted">0</span>
+                                    </div>
+                                    <div class="stat-row">
+                                        <span>Window Events</span>
+                                        <span id="detail-windows" class="text-muted">0</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="settings-card" style="margin-top: 1.5rem;">
+                            <h3>Data Management</h3>
+                            <div style="display: flex; gap: 1rem; margin-top: 1rem;">
+                                <button class="btn-secondary" id="view-client-data">
+                                    <i class="fas fa-eye"></i> View All Data
+                                </button>
+                                <button class="btn-danger" id="delete-client-data">
+                                    <i class="fas fa-trash"></i> Delete Client Data
+                                </button>
+                                <button class="btn-danger" id="kick-client">
+                                    <i class="fas fa-sign-out-alt"></i> Kick Client
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>MeowKey Monitoring System v1.0 | Secure Connection Established</p>
+            <p class="timestamp" id="current-time"></p>
+        </footer>
+    </div>
+
+    <script src="js/utils.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>
